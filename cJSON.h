@@ -85,7 +85,7 @@ then using the CJSON_API_VISIBILITY flag to "export" the same symbols the way CJ
 
 #include <stddef.h>
 
-/* cJSON Types: */
+/* 使用位标志 */
 #define cJSON_Invalid (0)
 #define cJSON_False  (1 << 0)
 #define cJSON_True   (1 << 1)
@@ -99,40 +99,80 @@ then using the CJSON_API_VISIBILITY flag to "export" the same symbols the way CJ
 #define cJSON_IsReference 256
 #define cJSON_StringIsConst 512
 
-/* The cJSON structure: */
+/* cJSON 结构体：是整个库的核心数据结构
+ * 采用“双向链表”+“树”的混合结构来表示复杂的 JSON 数据
+ */
 typedef struct cJSON
 {
-    /* next/prev allow you to walk array/object chains. Alternatively, use GetArraySize/GetArrayItem/GetObjectItem */
+    /* * 链表指针：用于连接数组或对象中的“兄弟”节点
+     * 例如在 {"a":1, "b":2} 中，"a" 的 next 指向 "b"，"b" 的 prev 指向 "a"
+     */
     struct cJSON *next;
     struct cJSON *prev;
-    /* An array or object item will have a child pointer pointing to a chain of the items in the array/object. */
+    /* * 子节点指针：用于进入下一层级
+     * 如果当前节点是对象(Object)或数组(Array)，child 指向其中的第一个元素
+     * 这体现了树状结构，也是递归遍历的入口
+     */
     struct cJSON *child;
 
-    /* The type of the item, as above. */
+    /* * 类型标识：通过位掩码(Bitmask)来区分是 String, Number, True, False 等
+     * 使用 int 而不是 enum 是为了通过位运算快速检查类型
+     */
     int type;
 
-    /* The item's string, if type==cJSON_String  and type == cJSON_Raw */
+    /* * 字符串值：如果 type 是 cJSON_String，这里存储具体的字符串内容
+     * 这里使用的是 char * 指针，意味着字符串内存是动态分配的
+     */
     char *valuestring;
-    /* writing to valueint is DEPRECATED, use cJSON_SetNumberValue instead */
+    /* * 这个字段已被废弃
+     *以前用于存储整数值，但现在不推荐直接使用
+     *官方建议使用 cJSON_SetNumberValue() 函数来设置数值
+     */
     int valueint;
-    /* The item's number, if type==cJSON_Number */
+    /* * 当 JSON 项的类型是 cJSON_Number 时，这个字段存储实际的数值
+     *使用 double 类型可以存储整数和小数
+     *所有数值（包括整数）都以双精度浮点数形式存储
+     */
     double valuedouble;
 
-    /* The item's name string, if this item is the child of, or is in the list of subitems of an object. */
+    /* * 存储 JSON 对象的键名（key）
+     *只有当这个项是某个对象的子项时才有意义
+     *在对象中用于标识这个值的名称
+     * 如果是数组元素，这里通常为 NULL
+     */
     char *string;
 } cJSON;
 
+/* 内存管理控制：在某些特殊环境下（如嵌入式系统），你可能想使用自己的内存池
+ * 调试目的：可以包装 malloc/free 来跟踪内存泄漏
+ * 性能优化：使用特定的内存分配器提高性能
+ * 跨平台兼容：某些平台可能有特殊的内存管理要求
+ */
 typedef struct cJSON_Hooks
 {
-      /* malloc/free are CDECL on Windows regardless of the default calling convention of the compiler, so ensure the hooks allow passing those functions directly. */
-      void *(CJSON_CDECL *malloc_fn)(size_t sz);
-      void (CJSON_CDECL *free_fn)(void *ptr);
+    /* malloc/free are CDECL on Windows regardless of the default calling convention of the compiler, so ensure the hooks allow passing those functions directly. */
+    /* malloc_fn:函数指针，指向自定义的内存分配函数
+     * 参数：size_t sz - 要分配的内存大小（字节）
+     * 返回值：void* - 指向分配内存的指针
+     * 使用 CJSON_CDECL 确保调用约定兼容性
+     */
+    void *(CJSON_CDECL *malloc_fn)(size_t sz);
+    /* ree_fn：函数指针，指向自定义的内存释放函数
+     * 参数：void *ptr - 要释放的内存指针
+     * 无返回值
+     * 同样使用 CJSON_CDECL 调用约定
+     */
+    void (CJSON_CDECL *free_fn)(void *ptr);
 } cJSON_Hooks;
 
 typedef int cJSON_bool;
 
 /* Limits how deeply nested arrays/objects can be before cJSON rejects to parse them.
- * This is to prevent stack overflows. */
+ * This is to prevent stack overflows.
+ * 限制 JSON 数据解析时的最大嵌套深度
+ * 默认值为 1000 层
+ * 防止解析特制的深层嵌套 JSON 导致栈溢出
+ */
 #ifndef CJSON_NESTING_LIMIT
 #define CJSON_NESTING_LIMIT 1000
 #endif
@@ -143,9 +183,13 @@ typedef int cJSON_bool;
 #define CJSON_CIRCULAR_LIMIT 10000
 #endif
 
+/*cJSON 库的完整公共API接口声明*/
+
+/*版本和初始化*/
 /* returns the version of cJSON as a string */
 CJSON_PUBLIC(const char*) cJSON_Version(void);
 
+/*解析JSON（反序列化）*/
 /* Supply malloc, realloc and free functions to cJSON */
 CJSON_PUBLIC(void) cJSON_InitHooks(cJSON_Hooks* hooks);
 
