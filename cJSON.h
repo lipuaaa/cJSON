@@ -157,7 +157,7 @@ typedef struct cJSON_Hooks
      * 使用 CJSON_CDECL 确保调用约定兼容性
      */
     void *(CJSON_CDECL *malloc_fn)(size_t sz);
-    /* ree_fn：函数指针，指向自定义的内存释放函数
+    /* free_fn：函数指针，指向自定义的内存释放函数
      * 参数：void *ptr - 要释放的内存指针
      * 无返回值
      * 同样使用 CJSON_CDECL 调用约定

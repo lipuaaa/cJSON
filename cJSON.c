@@ -23,20 +23,28 @@
 /* cJSON */
 /* JSON parser in C. */
 
-/* disable warnings about old C89 functions in MSVC */
+/* cJSON核心注释：
+ * 解析器核心职责：将JSON字符串转换为cJSON树形数据结构；
+ * 生成器核心职责：将cJSON树形结构转回格式化/非格式化JSON字符串。
+ */
+
+/* 禁用MSVC对C89旧函数的警告（如strdup、malloc等） */
 #if !defined(_CRT_SECURE_NO_DEPRECATE) && defined(_MSC_VER)
 #define _CRT_SECURE_NO_DEPRECATE
 #endif
 
+/* GCC编译器下，设置符号默认可见性为public（动态库导出用） */
 #ifdef __GNUC__
 #pragma GCC visibility push(default)
 #endif
+/* MSVC编译器下，禁用“系统头文件中单行注释”的警告（C89兼容） */
 #if defined(_MSC_VER)
 #pragma warning (push)
 /* disable warning about single line comments in system headers */
 #pragma warning (disable : 4001)
 #endif
 
+/* 解析器依赖的核心头文件：字符串、IO、数学、内存、字符处理等 */
 #include <string.h>
 #include <stdio.h>
 #include <math.h>
@@ -45,10 +53,12 @@
 #include <ctype.h>
 #include <float.h>
 
+/* 可选：启用本地化支持（影响数值解析的小数点符号） */
 #ifdef ENABLE_LOCALES
 #include <locale.h>
 #endif
 
+/* 恢复MSVC警告级别 */
 #if defined(_MSC_VER)
 #pragma warning (pop)
 #endif
@@ -56,9 +66,11 @@
 #pragma GCC visibility pop
 #endif
 
+/* 引入cJSON核心头文件（定义数据结构、宏、函数声明） */
 #include "cJSON.h"
 
-/* define our own boolean type */
+/* ========== 解析器基础类型/宏定义 ========== */
+/* 重新定义布尔类型（避免与系统宏冲突），适配cJSON的布尔逻辑 */
 #ifdef true
 #undef true
 #endif
@@ -69,7 +81,10 @@
 #endif
 #define false ((cJSON_bool)0)
 
-/* define isnan and isinf for ANSI C, if in C99 or above, isnan and isinf has been defined in math.h */
+/* 兼容ANSI C（C89）：定义isinf/isnan宏（C99及以上math.h已内置）
+ * isinf：判断是否为无穷大（通过d-d为NaN且d本身非NaN判定）
+ * isnan：判断是否为非数值（NaN，通过d != d判定，NaN的特性）
+ */
 #ifndef isinf
 #define isinf(d) (isnan((d - d)) && !isnan(d))
 #endif
@@ -77,25 +92,38 @@
 #define isnan(d) (d != d)
 #endif
 
+/* 兼容定义NaN值（不同平台实现差异） */
 #ifndef NAN
 #ifdef _WIN32
-#define NAN sqrt(-1.0)
+#define NAN sqrt(-1.0)   /* Windows下通过负数开平方生成NaN */
 #else
-#define NAN 0.0/0.0
+#define NAN 0.0/0.0      /* 类Unix下通过0除0生成NaN */
 #endif
 #endif
 
+/* ========== 解析器错误处理核心结构 ========== */
+/* 全局错误信息结构体：记录解析失败时的JSON字符串指针和偏移位置
+ * 作用：解析出错时，通过cJSON_GetErrorPtr()返回错误位置
+ */
 typedef struct {
-    const unsigned char *json;
-    size_t position;
+    const unsigned char *json;    /* 待解析的JSON原字符串 */
+    size_t position;              /* 解析出错时的字符偏移量 */
 } error;
-static error global_error = { NULL, 0 };
+static error global_error = { NULL, 0 };  /* 全局错误实例，初始化为空 */
 
+/* 获取解析错误位置的公共接口
+ * 返回值：解析失败时，指向JSON字符串中错误位置的指针；成功时为NULL
+ */
 CJSON_PUBLIC(const char *) cJSON_GetErrorPtr(void)
 {
     return (const char*) (global_error.json + global_error.position);
 }
 
+/* ========== 解析结果取值辅助函数 ========== */
+/* 获取JSON字符串类型节点的字符串值
+ * 参数：item - 待取值的cJSON节点
+ * 返回值：成功返回字符串指针；失败（非字符串类型）返回NULL
+ */
 CJSON_PUBLIC(char *) cJSON_GetStringValue(const cJSON * const item)
 {
     if (!cJSON_IsString(item))
@@ -106,6 +134,10 @@ CJSON_PUBLIC(char *) cJSON_GetStringValue(const cJSON * const item)
     return item->valuestring;
 }
 
+/* 获取JSON数值类型节点的数值（double型）
+ * 参数：item - 待取值的cJSON节点
+ * 返回值：成功返回double数值；失败（非数值类型）返回NaN
+ */
 CJSON_PUBLIC(double) cJSON_GetNumberValue(const cJSON * const item)
 {
     if (!cJSON_IsNumber(item))
@@ -116,11 +148,16 @@ CJSON_PUBLIC(double) cJSON_GetNumberValue(const cJSON * const item)
     return item->valuedouble;
 }
 
-/* This is a safeguard to prevent copy-pasters from using incompatible C and header files */
+/* 版本一致性校验：防止C文件和头文件版本不匹配导致的解析异常
+ * 编译期检查：如果cJSON.h和cJSON.c的版本号不一致，直接报编译错误
+ */
 #if (CJSON_VERSION_MAJOR != 1) || (CJSON_VERSION_MINOR != 7) || (CJSON_VERSION_PATCH != 19)
     #error cJSON.h and cJSON.c have different versions. Make sure that both have the same.
 #endif
 
+/* 获取cJSON版本号的公共接口
+ * 返回值：格式为"x.y.z"的版本字符串（静态内存，无需释放）
+ */
 CJSON_PUBLIC(const char*) cJSON_Version(void)
 {
     static char version[15];
@@ -129,7 +166,12 @@ CJSON_PUBLIC(const char*) cJSON_Version(void)
     return version;
 }
 
-/* Case insensitive string comparison, doesn't consider two NULL pointers equal though */
+/* ========== 解析器辅助工具函数：字符串比较 ========== */
+/* 大小写不敏感的字符串比较（解析JSON对象key时的核心逻辑）
+ * 参数：string1/string2 - 待比较的两个字符串
+ * 返回值：0=相等；非0=不等（差值）；若任一字符串为NULL，返回1（视为不等）
+ * 注：JSON标准中key是大小写敏感的，但cJSON早期版本默认不敏感，需用CaseSensitive接口
+ */
 static int case_insensitive_strcmp(const unsigned char *string1, const unsigned char *string2)
 {
     if ((string1 == NULL) || (string2 == NULL))
@@ -142,6 +184,7 @@ static int case_insensitive_strcmp(const unsigned char *string1, const unsigned 
         return 0;
     }
 
+    /* 逐字符转换为小写比较，直到遇到不同字符或字符串结束 */
     for(; tolower(*string1) == tolower(*string2); (void)string1++, string2++)
     {
         if (*string1 == '\0')
@@ -153,13 +196,20 @@ static int case_insensitive_strcmp(const unsigned char *string1, const unsigned 
     return tolower(*string1) - tolower(*string2);
 }
 
+/* ========== 解析器内存管理核心结构 ========== */
+/* 内存钩子结构体：自定义内存分配/释放/重分配函数
+ * 作用：允许用户替换cJSON默认的malloc/free/realloc，适配嵌入式等定制场景
+ */
 typedef struct internal_hooks
 {
-    void *(CJSON_CDECL *allocate)(size_t size);
-    void (CJSON_CDECL *deallocate)(void *pointer);
-    void *(CJSON_CDECL *reallocate)(void *pointer, size_t size);
+    void *(CJSON_CDECL *allocate)(size_t size);                  /* 内存分配函数（替代malloc） */
+    void (CJSON_CDECL *deallocate)(void *pointer);               /* 内存释放函数（替代free） */
+    void *(CJSON_CDECL *reallocate)(void *pointer, size_t size); /* 内存重分配（替代realloc） */
 } internal_hooks;
 
+/* MSVC编译器兼容：避免dllimport符号的地址非静态问题
+ * 封装默认内存函数为静态函数，确保符号可访问
+ */
 #if defined(_MSC_VER)
 /* work around MSVC error C2322: '...' address of dllimport '...' is not static */
 static void * CJSON_CDECL internal_malloc(size_t size)
@@ -175,16 +225,23 @@ static void * CJSON_CDECL internal_realloc(void *pointer, size_t size)
     return realloc(pointer, size);
 }
 #else
+/* 非MSVC编译器：直接映射到系统默认内存函数 */
 #define internal_malloc malloc
 #define internal_free free
 #define internal_realloc realloc
 #endif
 
+/* 编译期计算字符串字面量长度（避免运行期strlen） */
 /* strlen of character literals resolved at compile time */
 #define static_strlen(string_literal) (sizeof(string_literal) - sizeof(""))
 
+/* 全局内存钩子实例：默认使用系统malloc/free/realloc */
 static internal_hooks global_hooks = { internal_malloc, internal_free, internal_realloc };
 
+/* 字符串拷贝函数（适配自定义内存钩子）
+ * 参数：string - 源字符串；hooks - 内存钩子（指定分配函数）
+ * 返回值：成功返回拷贝后的字符串（需通过hooks->deallocate释放）；失败返回NULL
+ */
 static unsigned char* cJSON_strdup(const unsigned char* string, const internal_hooks * const hooks)
 {
     size_t length = 0;
@@ -195,41 +252,52 @@ static unsigned char* cJSON_strdup(const unsigned char* string, const internal_h
         return NULL;
     }
 
+    /* 计算字符串长度（含终止符'\0'） */
     length = strlen((const char*)string) + sizeof("");
+    /* 用自定义内存分配函数分配空间 */
     copy = (unsigned char*)hooks->allocate(length);
     if (copy == NULL)
     {
         return NULL;
     }
-    memcpy(copy, string, length);
+    memcpy(copy, string, length);  /* 内存拷贝（含终止符） */
 
     return copy;
 }
 
+/* 初始化cJSON内存钩子的公共接口
+ * 参数：hooks - 用户自定义的内存钩子（NULL表示恢复默认）
+ * 逻辑：
+ * 1. 若hooks为NULL，恢复为系统默认malloc/free/realloc；
+ * 2. 若hooks非空，替换为用户自定义的malloc/free；
+ * 3. 仅当malloc/free均为系统默认时，才启用realloc（避免自定义内存池冲突）
+ */
 CJSON_PUBLIC(void) cJSON_InitHooks(cJSON_Hooks* hooks)
 {
     if (hooks == NULL)
     {
-        /* Reset hooks */
+        /* 重置为默认内存函数 */
         global_hooks.allocate = malloc;
         global_hooks.deallocate = free;
         global_hooks.reallocate = realloc;
         return;
     }
 
+    /* 初始化分配函数：默认用malloc，用户有自定义则替换 */
     global_hooks.allocate = malloc;
     if (hooks->malloc_fn != NULL)
     {
         global_hooks.allocate = hooks->malloc_fn;
     }
 
+    /* 初始化释放函数：默认用free，用户有自定义则替换 */
     global_hooks.deallocate = free;
     if (hooks->free_fn != NULL)
     {
         global_hooks.deallocate = hooks->free_fn;
     }
 
-    /* use realloc only if both free and malloc are used */
+    /* 重分配函数：仅当分配/释放均为系统默认时才启用（避免自定义内存池不兼容） */
     global_hooks.reallocate = NULL;
     if ((global_hooks.allocate == malloc) && (global_hooks.deallocate == free))
     {
@@ -237,6 +305,12 @@ CJSON_PUBLIC(void) cJSON_InitHooks(cJSON_Hooks* hooks)
     }
 }
 
+/* ========== 解析器核心：cJSON节点创建/销毁 ========== */
+/* 内部节点构造函数：创建空的cJSON节点（解析器构建树形结构的基础）
+ * 参数：hooks - 内存钩子（指定分配函数）
+ * 返回值：成功返回cJSON节点指针；失败（内存不足）返回NULL
+ * 逻辑：分配内存后用memset清零，确保所有字段初始化为空
+ */
 /* Internal constructor. */
 static cJSON *cJSON_New_Item(const internal_hooks * const hooks)
 {
