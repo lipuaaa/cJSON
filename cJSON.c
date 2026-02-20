@@ -323,32 +323,47 @@ static cJSON *cJSON_New_Item(const internal_hooks * const hooks)
     return node;
 }
 
+/* 销毁cJSON节点（及所有子节点）的公共接口（解析完成后释放内存的核心）
+ * 参数：item - 待销毁的cJSON根节点
+ * 逻辑：
+ * 1. 遍历链表（next指针），逐个销毁节点；
+ * 2. 若节点非引用类型：销毁子节点、释放字符串值、释放key字符串；
+ * 3. 最后释放当前节点内存；
+ */
 /* Delete a cJSON structure. */
 CJSON_PUBLIC(void) cJSON_Delete(cJSON *item)
 {
     cJSON *next = NULL;
     while (item != NULL)
     {
-        next = item->next;
+        next = item->next;  /* 先保存下一个节点，避免销毁后指针失效 */
+        /* 非引用类型 + 有子节点：递归销毁子节点（数组/对象的子元素） */
         if (!(item->type & cJSON_IsReference) && (item->child != NULL))
         {
             cJSON_Delete(item->child);
         }
+        /* 非引用类型 + 有字符串值：释放valuestring（字符串/原始JSON值） */
         if (!(item->type & cJSON_IsReference) && (item->valuestring != NULL))
         {
             global_hooks.deallocate(item->valuestring);
             item->valuestring = NULL;
         }
+        /* 非常量字符串 + 有key字符串：释放object的key字符串 */
         if (!(item->type & cJSON_StringIsConst) && (item->string != NULL))
         {
             global_hooks.deallocate(item->string);
             item->string = NULL;
         }
+        /* 释放当前节点内存 */
         global_hooks.deallocate(item);
         item = next;
     }
 }
 
+/* ========== 数值解析辅助：获取本地化小数点符号 ========== */
+/* 获取当前系统本地化设置的小数点符号（影响数值解析的兼容性）
+ * 返回值：默认返回'.'；启用ENABLE_LOCALES时返回系统本地化小数点（如','）
+ */
 /* get the decimal point character of the current locale */
 static unsigned char get_decimal_point(void)
 {
@@ -360,39 +375,60 @@ static unsigned char get_decimal_point(void)
 #endif
 }
 
+/* ========== 解析器核心：解析缓冲区结构体 ========== */
+/* 解析缓冲区结构体：封装待解析的JSON字符串、偏移量、嵌套深度等信息
+ * 作用：统一管理解析过程中的上下文，简化参数传递
+ */
 typedef struct
 {
-    const unsigned char *content;
-    size_t length;
-    size_t offset;
-    size_t depth; /* How deeply nested (in arrays/objects) is the input at the current offset. */
-    internal_hooks hooks;
+    const unsigned char *content;  /* 待解析的JSON原始字符串 */
+    size_t length;                 /* JSON字符串总长度 */
+    size_t offset;                 /* 当前解析的字符偏移量（进度） */
+    size_t depth;                  /* 当前解析的嵌套深度（数组/对象），防止栈溢出 */
+    internal_hooks hooks;          /* 内存钩子（解析过程中分配节点用） */
 } parse_buffer;
 
-/* check if the given size is left to read in a given parse buffer (starting with 1) */
+/* 解析缓冲区宏：简化边界检查（核心安全逻辑，防止越界访问） */
+/* 检查是否能读取size个字符（从当前offset开始，1-based） */
 #define can_read(buffer, size) ((buffer != NULL) && (((buffer)->offset + size) <= (buffer)->length))
-/* check if the buffer can be accessed at the given index (starting with 0) */
+/* 检查是否能访问指定索引的字符（0-based） */
 #define can_access_at_index(buffer, index) ((buffer != NULL) && (((buffer)->offset + index) < (buffer)->length))
 #define cannot_access_at_index(buffer, index) (!can_access_at_index(buffer, index))
-/* get a pointer to the buffer at the position */
+/* 获取当前offset位置的字符指针 */
 #define buffer_at_offset(buffer) ((buffer)->content + (buffer)->offset)
 
+/* ========== 解析器核心：数值解析函数（JSON Number类型） ========== */
+/* 解析JSON数值字符串，填充到cJSON节点中
+ * 参数：
+ *   item - 待填充的cJSON节点（需提前创建）
+ *   input_buffer - 解析缓冲区（含JSON字符串、偏移量等）
+ * 返回值：true=解析成功；false=解析失败（内存不足/格式非法）
+ * 核心逻辑：
+ * 1. 提取数值字符串片段（0-9/+/-/./e/E）；
+ * 2. 适配本地化小数点（将'.'替换为系统小数点）；
+ * 3. 用strtod转换为double值，填充到节点；
+ * 4. 更新解析缓冲区偏移量，完成数值解析；
+ */
 /* Parse the input text to generate a number, and populate the result into item. */
 static cJSON_bool parse_number(cJSON * const item, parse_buffer * const input_buffer)
 {
     double number = 0;
     unsigned char *after_end = NULL;
     unsigned char *number_c_string;
-    unsigned char decimal_point = get_decimal_point();
+    unsigned char decimal_point = get_decimal_point();  /* 获取系统小数点符号 */
     size_t i = 0;
     size_t number_string_length = 0;
-    cJSON_bool has_decimal_point = false;
+    cJSON_bool has_decimal_point = false;  /* 标记是否包含小数点 */
 
+    /* 入参合法性检查：缓冲区/内容为空则失败 */
     if ((input_buffer == NULL) || (input_buffer->content == NULL))
     {
         return false;
     }
 
+    /* 第一步：提取数值字符串片段（遍历直到非数值字符）
+     * 支持的字符：0-9、+、-、e/E、.（小数点）
+     */
     /* copy the number into a temporary buffer and replace '.' with the decimal point
      * of the current locale (for strtod)
      * This also takes care of '\0' not necessarily being available for marking the end of the input */
@@ -414,29 +450,31 @@ static cJSON_bool parse_number(cJSON * const item, parse_buffer * const input_bu
             case '-':
             case 'e':
             case 'E':
-                number_string_length++;
+                number_string_length++;/* 合法数值字符，长度+1 */
                 break;
 
             case '.':
                 number_string_length++;
-                has_decimal_point = true;
+                has_decimal_point = true;/* 标记包含小数点 */
                 break;
 
             default:
-                goto loop_end;
+                goto loop_end;/* 遇到非数值字符，终止遍历 */
         }
     }
 loop_end:
-    /* malloc for temporary buffer, add 1 for '\0' */
+    /* 第二步：分配临时缓冲区存储数值字符串（+1为终止符'\0'） */
     number_c_string = (unsigned char *) input_buffer->hooks.allocate(number_string_length + 1);
     if (number_c_string == NULL)
     {
-        return false; /* allocation failure */
+        return false; /* 内存分配失败，解析失败 */
     }
 
+    /* 拷贝数值字符串到临时缓冲区，并添加终止符 */
     memcpy(number_c_string, buffer_at_offset(input_buffer), number_string_length);
     number_c_string[number_string_length] = '\0';
 
+    /* 第三步：适配本地化小数点（将字符串中的'.'替换为系统小数点） */
     if (has_decimal_point)
     {
         for (i = 0; i < number_string_length; i++)
@@ -449,7 +487,9 @@ loop_end:
         }
     }
 
+    /* 第四步：将字符串转换为double数值（strtod适配本地化小数点） */
     number = strtod((const char*)number_c_string, (char**)&after_end);
+    /* 检查转换是否成功：若转换后指针未到字符串末尾，说明格式非法 */
     if (number_c_string == after_end)
     {
         /* free the temporary buffer */
@@ -457,6 +497,7 @@ loop_end:
         return false; /* parse_error */
     }
 
+    /* 第五步：填充cJSON节点的数值字段 */
     item->valuedouble = number;
 
     /* use saturation in case of overflow */
@@ -475,12 +516,19 @@ loop_end:
 
     item->type = cJSON_Number;
 
+    /* 第六步：更新解析缓冲区偏移量（跳过已解析的数值字符串） */
     input_buffer->offset += (size_t)(after_end - number_c_string);
-    /* free the temporary buffer */
+    /* 释放临时缓冲区，返回解析成功 */
     input_buffer->hooks.deallocate(number_c_string);
     return true;
 }
 
+/* 数值设置辅助函数（兼容旧版接口）
+ * 注释说明：原cJSON_SetNumberValue设计不规范，同时返回int/double，此函数统一返回double
+ * 参数：object - 待设置的cJSON节点；number - 要设置的double数值
+ * 返回值：设置后的double值（方便链式调用）
+ * 核心逻辑：和parse_number一致，做int类型的溢出饱和保护
+ */
 /* don't ask me, but the original cJSON_SetNumberValue returns an integer or double */
 CJSON_PUBLIC(double) cJSON_SetNumberHelper(cJSON *object, double number)
 {
@@ -496,21 +544,37 @@ CJSON_PUBLIC(double) cJSON_SetNumberHelper(cJSON *object, double number)
     {
         object->valueint = (int)number;
     }
-
+    
+    /* 先设置valuedouble，再返回该值（赋值表达式的返回值是右值） */
     return object->valuedouble = number;
 }
 
+/* 设置cJSON字符串节点的valuestring（核心写操作接口）
+ * 注意：传入NULL valuestring视为错误，返回NULL；
+ *       仅允许修改非引用类型、字符串类型的节点valuestring
+ * 参数：object - 目标cJSON节点；valuestring - 新的字符串值
+ * 返回值：成功返回新的valuestring指针；失败返回NULL
+ */
 /* Note: when passing a NULL valuestring, cJSON_SetValuestring treats this as an error and return NULL */
 CJSON_PUBLIC(char*) cJSON_SetValuestring(cJSON *object, const char *valuestring)
 {
     char *copy = NULL;
     size_t v1_len;
     size_t v2_len;
+    /* 合法性检查1：
+     * - 节点为NULL → 非法
+     * - 节点类型不是字符串 → 非法（仅字符串节点有valuestring）
+     * - 节点是引用类型 → 非法（引用节点不允许修改valuestring）
+     */
     /* if object's type is not cJSON_String or is cJSON_IsReference, it should not set valuestring */
     if ((object == NULL) || !(object->type & cJSON_String) || (object->type & cJSON_IsReference))
     {
         return NULL;
     }
+    /* 合法性检查2：
+     * - 原valuestring为NULL（节点损坏） → 非法
+     * - 新valuestring为NULL → 非法（视为错误输入）
+     */
     /* return NULL if the object is corrupted or valuestring is NULL */
     if (object->valuestring == NULL || valuestring == NULL)
     {
@@ -522,76 +586,95 @@ CJSON_PUBLIC(char*) cJSON_SetValuestring(cJSON *object, const char *valuestring)
 
     if (v1_len <= v2_len)
     {
+        /* 新字符串更短/等长：尝试直接覆盖（避免重新分配内存）
+         * 关键检查：字符串重叠判断（strcpy不处理重叠内存，会导致数据错乱）
+         * 重叠条件：新字符串的末尾 ≥ 原字符串起始，且原字符串末尾 ≥ 新字符串起始
+         * 举例：valuestring="abc", object->valuestring="bc" → 重叠，禁止覆盖
+         */
         /* strcpy does not handle overlapping string: [X1, X2] [Y1, Y2] => X2 < Y1 or Y2 < X1 */
         if (!( valuestring + v1_len < object->valuestring || object->valuestring + v2_len < valuestring ))
         {
             return NULL;
         }
+        /* 无重叠，直接拷贝新字符串到原缓冲区（strcpy自动添加终止符） */
         strcpy(object->valuestring, valuestring);
         return object->valuestring;
     }
+    /* 新字符串更长：需要重新分配内存 */
     copy = (char*) cJSON_strdup((const unsigned char*)valuestring, &global_hooks);
     if (copy == NULL)
     {
         return NULL;
     }
+    /* 释放原valuestring内存（避免内存泄漏） */
     if (object->valuestring != NULL)
     {
         cJSON_free(object->valuestring);
     }
+    /* 替换为新字符串指针 */
     object->valuestring = copy;
 
     return copy;
 }
 
+/* 打印缓冲区结构体（JSON生成器核心：将cJSON节点转为字符串的缓冲区）
+ * 作用：封装字符串拼接的内存管理，支持动态扩容、格式化输出（缩进）
+ */
 typedef struct
 {
-    unsigned char *buffer;
-    size_t length;
-    size_t offset;
-    size_t depth; /* current nesting depth (for formatted printing) */
-    cJSON_bool noalloc;
-    cJSON_bool format; /* is this print a formatted print */
-    internal_hooks hooks;
+    unsigned char *buffer;/* 存储生成的JSON字符串的缓冲区 */
+    size_t length;        /* 缓冲区总长度（已分配的内存大小）*/
+    size_t offset;        /* 当前写入位置的偏移量（已使用的长度）*/
+    size_t depth;         /* 当前嵌套深度（用于格式化输出的缩进） */
+    cJSON_bool noalloc;   /* 是否禁止内存分配（true=仅使用现有缓冲区，false=动态扩容）*/
+    cJSON_bool format;    /* 是否格式化输出（true=带缩进/换行，false=紧凑格式）*/
+    internal_hooks hooks; /* 内存钩子（缓冲区扩容时的分配/释放函数）*/
 } printbuffer;
 
+/* 确保打印缓冲区有足够空间（核心内存管理函数）
+ * 参数：p - 打印缓冲区；needed - 需要新增的字节数（含终止符）
+ * 返回值：成功返回缓冲区当前写入位置的指针；失败返回NULL
+ * 核心逻辑：
+ * 1. 检查入参合法性 2. 计算所需总空间 3. 空间足够直接返回 4. 空间不足则扩容
+ */
 /* realloc printbuffer if necessary to have at least "needed" bytes more */
 static unsigned char* ensure(printbuffer * const p, size_t needed)
 {
     unsigned char *newbuffer = NULL;
     size_t newsize = 0;
 
+    /* 入参合法性检查：缓冲区/缓冲区指针为空 → 失败 */
     if ((p == NULL) || (p->buffer == NULL))
     {
         return NULL;
     }
-
+    /* 偏移量越界检查：已使用长度 ≥ 总长度 → 失败 */
     if ((p->length > 0) && (p->offset >= p->length))
     {
         /* make sure that offset is valid */
         return NULL;
     }
-
+    /* 长度超限检查：需要的字节数超过INT_MAX → 不支持，失败 */
     if (needed > INT_MAX)
     {
         /* sizes bigger than INT_MAX are currently not supported */
         return NULL;
     }
-
+    /* 计算需要的总空间：已使用长度 + 新增长度 + 1（终止符） */
     needed += p->offset + 1;
     if (needed <= p->length)
     {
         return p->buffer + p->offset;
     }
-
+    /* 禁止分配内存：直接返回失败（noalloc=true时，仅使用现有缓冲区） */
     if (p->noalloc) {
         return NULL;
     }
 
-    /* calculate new buffer size */
+    /* 计算新缓冲区大小（扩容策略） */
     if (needed > (INT_MAX / 2))
     {
-        /* overflow of int, use INT_MAX if possible */
+        /* 避免int溢出：若所需空间 ≤ INT_MAX，设为INT_MAX；否则失败 */
         if (needed <= INT_MAX)
         {
             newsize = INT_MAX;
@@ -603,15 +686,17 @@ static unsigned char* ensure(printbuffer * const p, size_t needed)
     }
     else
     {
+        /* 常规扩容：新大小 = 所需空间 × 2（减少频繁扩容） */
         newsize = needed * 2;
     }
-
+    /* 尝试扩容缓冲区 */
     if (p->hooks.reallocate != NULL)
     {
-        /* reallocate with realloc if available */
+        /* 有realloc函数：直接重分配（效率更高，无需拷贝） */
         newbuffer = (unsigned char*)p->hooks.reallocate(p->buffer, newsize);
         if (newbuffer == NULL)
         {
+            /* 重分配失败：释放原缓冲区，重置状态，返回NULL */            
             p->hooks.deallocate(p->buffer);
             p->length = 0;
             p->buffer = NULL;
@@ -621,26 +706,33 @@ static unsigned char* ensure(printbuffer * const p, size_t needed)
     }
     else
     {
-        /* otherwise reallocate manually */
+        /* 无realloc函数：手动分配新缓冲区 + 拷贝数据 + 释放原缓冲区 */
         newbuffer = (unsigned char*)p->hooks.allocate(newsize);
         if (!newbuffer)
         {
+            /* 分配失败：释放原缓冲区，重置状态，返回NULL */
             p->hooks.deallocate(p->buffer);
             p->length = 0;
             p->buffer = NULL;
 
             return NULL;
         }
-
+        /* 拷贝原缓冲区数据到新缓冲区（含终止符） */
         memcpy(newbuffer, p->buffer, p->offset + 1);
+        /* 释放原缓冲区 */       
         p->hooks.deallocate(p->buffer);
     }
+    /* 更新缓冲区状态：新长度、新指针 */
     p->length = newsize;
     p->buffer = newbuffer;
-
+    /* 返回新缓冲区的当前写入位置指针 */
     return newbuffer + p->offset;
 }
 
+/* 更新打印缓冲区的偏移量（核心辅助函数）
+ * 原理：计算当前写入位置到终止符的长度，更新offset为总已使用长度
+ * 作用：确保后续写入不会覆盖已有数据，正确计算缓冲区使用量
+ */
 /* calculate the new length of the string in a printbuffer and update the offset */
 static void update_offset(printbuffer * const buffer)
 {
@@ -650,70 +742,87 @@ static void update_offset(printbuffer * const buffer)
         return;
     }
     buffer_pointer = buffer->buffer + buffer->offset;
-
+    /* 更新offset：原有偏移 + 当前字符串长度（strlen自动忽略终止符） */
     buffer->offset += strlen((const char*)buffer_pointer);
 }
 
-/* securely comparison of floating-point variables */
+/* 浮点数安全比较函数（解决浮点数精度问题）
+ * 参数：a/b - 待比较的两个double值
+ * 返回值：true=相等；false=不相等
+ * 核心逻辑：
+ * 1. 取两个数的绝对值最大值作为基准；
+ * 2. 比较两数差值的绝对值 ≤ 基准 × DBL_EPSILON（双精度浮点数最小精度）；
+ * 3. 避免直接用"=="比较浮点数（如0.1+0.2≠0.3）
+ */
 static cJSON_bool compare_double(double a, double b)
 {
     double maxVal = fabs(a) > fabs(b) ? fabs(a) : fabs(b);
     return (fabs(a - b) <= maxVal * DBL_EPSILON);
 }
 
-/* Render the number nicely from the given item into a string. */
+/* 将cJSON数值节点渲染为JSON字符串（生成器核心函数）
+ * 参数：item - 数值类型的cJSON节点；output_buffer - 打印缓冲区
+ * 返回值：true=渲染成功；false=失败
+ * 核心逻辑：
+ * 1. 处理NaN/无穷大 → 输出"null"（JSON标准不支持NaN/Infinity）；
+ * 2. 整数型double → 输出int格式（更紧凑）；
+ * 3. 浮点型double → 先尝试15位精度，验证是否可逆，不可逆则用17位；
+ * 4. 适配本地化小数点 → 统一转为JSON标准的"."；
+ */
 static cJSON_bool print_number(const cJSON * const item, printbuffer * const output_buffer)
 {
-    unsigned char *output_pointer = NULL;
-    double d = item->valuedouble;
-    int length = 0;
-    size_t i = 0;
-    unsigned char number_buffer[26] = {0}; /* temporary buffer to print the number into */
-    unsigned char decimal_point = get_decimal_point();
-    double test = 0.0;
+    unsigned char *output_pointer = NULL;/*缓冲区写入位置指针*/
+    double d = item->valuedouble;/*节点的double值*/
+    int length = 0;/*数值字符串长度*/
+    size_t i = 0;/*循环索引*/
+    unsigned char number_buffer[26] = {0}; /* 临时缓冲区：存储格式化后的数值字符串（26字节足够存储double的最大长度） */
+    unsigned char decimal_point = get_decimal_point();/*本地化小数点符号*/
+    double test = 0.0;/*验证转换可逆性的临时变量*/
 
+    /* 入参合法性检查：缓冲区为空 → 失败 */
     if (output_buffer == NULL)
     {
         return false;
     }
 
-    /* This checks for NaN and Infinity */
+    /* 处理NaN/无穷大：JSON标准无此类型，输出"null" */
     if (isnan(d) || isinf(d))
     {
         length = sprintf((char*)number_buffer, "null");
     }
+    /* 处理整数型double：d和其int值相等（无小数部分），输出int格式 */
     else if(d == (double)item->valueint)
     {
         length = sprintf((char*)number_buffer, "%d", item->valueint);
     }
+    /* 处理浮点型double：高精度输出并验证可逆性 */
     else
     {
-        /* Try 15 decimal places of precision to avoid nonsignificant nonzero digits */
+        /* 第一步：尝试15位精度输出（%1.15g自动去除末尾无意义的0）*/
         length = sprintf((char*)number_buffer, "%1.15g", d);
 
-        /* Check whether the original double can be recovered */
+        /* 验证转换可逆性：将输出的字符串转回double，比较是否和原值一致 */
         if ((sscanf((char*)number_buffer, "%lg", &test) != 1) || !compare_double((double)test, d))
         {
-            /* If not, print with 17 decimal places of precision */
+            /* 不可逆：用17位精度重新输出（double的最大有效精度） */
             length = sprintf((char*)number_buffer, "%1.17g", d);
         }
     }
 
-    /* sprintf failed or buffer overrun occurred */
+    /* 错误检查：sprintf失败（返回负数）或缓冲区溢出 → 失败 */
     if ((length < 0) || (length > (int)(sizeof(number_buffer) - 1)))
     {
         return false;
     }
 
-    /* reserve appropriate space in the output */
+    /* 确保打印缓冲区有足够空间（+1为终止符） */
     output_pointer = ensure(output_buffer, (size_t)length + sizeof(""));
     if (output_pointer == NULL)
     {
         return false;
     }
 
-    /* copy the printed number to the output and replace locale
-     * dependent decimal point with '.' */
+    /* 拷贝数值字符串到输出缓冲区，统一小数点为JSON标准的"." */
     for (i = 0; i < ((size_t)length); i++)
     {
         if (number_buffer[i] == decimal_point)
@@ -725,21 +834,26 @@ static cJSON_bool print_number(const cJSON * const item, printbuffer * const out
         output_pointer[i] = number_buffer[i];
     }
     output_pointer[i] = '\0';
-
+    /* 更新打印缓冲区偏移量（跳过已写入的数值字符串） */
     output_buffer->offset += (size_t)length;
 
     return true;
 }
 
-/* parse 4 digit hexadecimal number */
+/* 解析4位十六进制数（JSON字符串转义字符解析核心函数）
+ * 作用：解析\uXXXX格式的Unicode转义字符（如\u4e2d → 中）
+ * 参数：input - 指向4位十六进制字符串的指针（如"4e2d"）
+ * 返回值：成功返回解析后的无符号整数；失败返回0
+ * 核心逻辑：逐字符解析0-9/A-F/a-f，转换为4字节十六进制数
+ */
 static unsigned parse_hex4(const unsigned char * const input)
 {
-    unsigned int h = 0;
-    size_t i = 0;
+    unsigned int h = 0;/*存储解析后的十六进制数*/
+    size_t i = 0;/*循环索引（遍历4位字符）*/
 
     for (i = 0; i < 4; i++)
     {
-        /* parse digit */
+        /* 解析单个十六进制字符 */
         if ((input[i] >= '0') && (input[i] <= '9'))
         {
             h += (unsigned int) input[i] - '0';
@@ -752,14 +866,14 @@ static unsigned parse_hex4(const unsigned char * const input)
         {
             h += (unsigned int) 10 + input[i] - 'a';
         }
-        else /* invalid */
+        else /* 无效字符 */
         {
             return 0;
         }
-
+        /* 移位：前3位字符需要左移4位（每一位占4bit），最后一位无需移位 */
         if (i < 3)
         {
-            /* shift left to make place for the next nibble */
+            /* 左移4位，为下一位腾出空间 */
             h = h << 4;
         }
     }
