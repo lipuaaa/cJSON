@@ -881,55 +881,69 @@ static unsigned parse_hex4(const unsigned char * const input)
     return h;
 }
 
+/* 将UTF-16转义字面量（\uXXXX 或 \uXXXX\uXXXX）转换为UTF-8编码
+ * 背景：JSON字符串中的Unicode转义字符是UTF-16格式，需转为UTF-8存储/输出
+ * 参数：
+ *   input_pointer - 指向UTF-16转义序列起始（如"\u4e2d"的起始'\'）
+ *   input_end - 输入字符串结束位置（防止越界）
+ *   output_pointer - 输出缓冲区指针（存储转换后的UTF-8字符，会更新指针位置）
+ * 返回值：成功返回消耗的输入字节数（6=单\uXXXX，12=双\uXXXX\uXXXX）；失败返回0
+ */
 /* converts a UTF-16 literal to UTF-8
  * A literal can be one or two sequences of the form \uXXXX */
 static unsigned char utf16_literal_to_utf8(const unsigned char * const input_pointer, const unsigned char * const input_end, unsigned char **output_pointer)
 {
-    long unsigned int codepoint = 0;
-    unsigned int first_code = 0;
-    const unsigned char *first_sequence = input_pointer;
-    unsigned char utf8_length = 0;
-    unsigned char utf8_position = 0;
-    unsigned char sequence_length = 0;
-    unsigned char first_byte_mark = 0;
-
+    long unsigned int codepoint = 0;                    /*最终的Unicode码点（0-0x10FFFF）*/
+    unsigned int first_code = 0;                        /*第一个UTF-16序列的数值（\uXXXX）*/
+    const unsigned char *first_sequence = input_pointer;/*第一个\uXXXX的起始指针*/
+    unsigned char utf8_length = 0;                      /*转换后的UTF-8字符字节数（1-4）*/
+    unsigned char utf8_position = 0;                    /*UTF-8编码时的字节索引*/
+    unsigned char sequence_length = 0;                  /*输入UTF-16序列的总字节数（6/12）*/
+    unsigned char first_byte_mark = 0;                  /*UTF-8第一个字节的标记位（如0xE0=11100000）*/
+    
+    /* 合法性检查1：输入剩余长度不足6字节（\uXXXX至少需要6字节：\ + u + 4位16进制） */
     if ((input_end - first_sequence) < 6)
     {
         /* input ends unexpectedly */
         goto fail;
     }
 
-    /* get the first utf16 sequence */
+    /* 解析第一个UTF-16序列（跳过"\u"，取后4位16进制数） */
     first_code = parse_hex4(first_sequence + 2);
 
-    /* check that the code is valid */
+    /* 合法性检查2：第一个序列不能是UTF-16低代理项（0xDC00-0xDFFF）
+     * 原理：UTF-16代理对规则：高代理项（0xD800-0xDBFF）+ 低代理项（0xDC00-0xDFFF）
+     * 单独的低代理项是非法的
+     */
     if (((first_code >= 0xDC00) && (first_code <= 0xDFFF)))
     {
         goto fail;
     }
 
-    /* UTF16 surrogate pair */
+    /* 处理UTF-16代理对（编码超过0xFFFF的Unicode字符，需两个\uXXXX序列） */
     if ((first_code >= 0xD800) && (first_code <= 0xDBFF))
     {
         const unsigned char *second_sequence = first_sequence + 6;
         unsigned int second_code = 0;
         sequence_length = 12; /* \uXXXX\uXXXX */
 
+        /* 合法性检查3：第二个序列剩余长度不足6字节 */
         if ((input_end - second_sequence) < 6)
         {
             /* input ends unexpectedly */
             goto fail;
         }
 
+        /* 合法性检查4：第二个序列必须以"\u"开头 */
         if ((second_sequence[0] != '\\') || (second_sequence[1] != 'u'))
         {
             /* missing second half of the surrogate pair */
             goto fail;
         }
 
-        /* get the second utf16 sequence */
+        /* 解析第二个UTF-16序列（低代理项） */
         second_code = parse_hex4(second_sequence + 2);
-        /* check that the code is valid */
+        /* 合法性检查5：第二个序列必须是低代理项（0xDC00-0xDFFF） */
         if ((second_code < 0xDC00) || (second_code > 0xDFFF))
         {
             /* invalid second half of the surrogate pair */
@@ -937,151 +951,173 @@ static unsigned char utf16_literal_to_utf8(const unsigned char * const input_poi
         }
 
 
-        /* calculate the unicode codepoint from the surrogate pair */
+        /* 计算完整的Unicode码点（代理对转换公式）
+         * 原理：代理对表示 0x10000 ~ 0x10FFFF 的字符，公式：
+         * codepoint = 0x10000 + (高代理项 & 0x3FF) << 10 + (低代理项 & 0x3FF)
+         */
         codepoint = 0x10000 + (((first_code & 0x3FF) << 10) | (second_code & 0x3FF));
     }
     else
     {
+        /* 普通UTF-16序列（单\uXXXX，码点≤0xFFFF） */
         sequence_length = 6; /* \uXXXX */
         codepoint = first_code;
     }
 
-    /* encode as UTF-8
-     * takes at maximum 4 bytes to encode:
-     * 11110xxx 10xxxxxx 10xxxxxx 10xxxxxx */
+    /* 将Unicode码点编码为UTF-8（JSON标准要求UTF-8编码）
+     * UTF-8编码规则（最多4字节）：
+     * - 0x00~0x7F → 1字节：0xxxxxxx
+     * - 0x80~0x7FF → 2字节：110xxxxx 10xxxxxx
+     * - 0x800~0xFFFF → 3字节：1110xxxx 10xxxxxx 10xxxxxx
+     * - 0x10000~0x10FFFF → 4字节：11110xxx 10xxxxxx 10xxxxxx 10xxxxxx
+     */
     if (codepoint < 0x80)
     {
-        /* normal ascii, encoding 0xxxxxxx */
+        /* ASCII字符（0-127），1字节编码 */
         utf8_length = 1;
     }
     else if (codepoint < 0x800)
     {
-        /* two bytes, encoding 110xxxxx 10xxxxxx */
+        /* 2字节UTF-8，首字节标记位0xC0（11000000） */
         utf8_length = 2;
         first_byte_mark = 0xC0; /* 11000000 */
     }
     else if (codepoint < 0x10000)
     {
-        /* three bytes, encoding 1110xxxx 10xxxxxx 10xxxxxx */
+        /* 3字节UTF-8，首字节标记位0xE0（11100000） */
         utf8_length = 3;
         first_byte_mark = 0xE0; /* 11100000 */
     }
     else if (codepoint <= 0x10FFFF)
     {
-        /* four bytes, encoding 1110xxxx 10xxxxxx 10xxxxxx 10xxxxxx */
+        /* 4字节UTF-8，首字节标记位0xF0（11110000） */
         utf8_length = 4;
         first_byte_mark = 0xF0; /* 11110000 */
     }
     else
     {
-        /* invalid unicode codepoint */
+        /* 非法Unicode码点（超过0x10FFFF） */
         goto fail;
     }
 
-    /* encode as utf8 */
+    /* 编码为UTF-8字节序列（从后往前填充） */
     for (utf8_position = (unsigned char)(utf8_length - 1); utf8_position > 0; utf8_position--)
     {
-        /* 10xxxxxx */
+        /* 后续字节固定格式：10xxxxxx（0x80-0xBF） */
         (*output_pointer)[utf8_position] = (unsigned char)((codepoint | 0x80) & 0xBF);
         codepoint >>= 6;
     }
-    /* encode first byte */
+    /* 编码第一个字节 */
     if (utf8_length > 1)
     {
+        /*多字节：首字节 = 标记位 | 剩余码点（确保高位正确）*/
         (*output_pointer)[0] = (unsigned char)((codepoint | first_byte_mark) & 0xFF);
     }
     else
     {
+        /*单字节（ASCII）：直接取低7位（0x7F）*/
         (*output_pointer)[0] = (unsigned char)(codepoint & 0x7F);
     }
 
     *output_pointer += utf8_length;
 
+    /* 更新输出指针：跳过已写入的UTF-8字节 */
     return sequence_length;
 
 fail:
     return 0;
 }
 
-/* Parse the input text into an unescaped cinput, and populate item. */
+/* 解析JSON字符串（核心解析函数）：将带转义的JSON字符串转为无转义的C字符串，填充到cJSON节点
+ * 参数：
+ *   item - 待填充的cJSON节点（解析后标记为cJSON_String类型）
+ *   input_buffer - 解析缓冲区（含JSON字符串、偏移量等）
+ * 返回值：true=解析成功；false=解析失败
+ */
 static cJSON_bool parse_string(cJSON * const item, parse_buffer * const input_buffer)
 {
-    const unsigned char *input_pointer = buffer_at_offset(input_buffer) + 1;
-    const unsigned char *input_end = buffer_at_offset(input_buffer) + 1;
-    unsigned char *output_pointer = NULL;
-    unsigned char *output = NULL;
+    const unsigned char *input_pointer = buffer_at_offset(input_buffer) + 1;/*输入指针：跳过开头的双引号（"），指向字符串内容起始*/
+    const unsigned char *input_end = buffer_at_offset(input_buffer) + 1;/*输入结束指针：初始指向开头双引号后，后续遍历到结束双引号*/
+    unsigned char *output_pointer = NULL;/*输出缓冲区写入指针*/
+    unsigned char *output = NULL;/*输出缓冲区（存储无转义的字符串）*/
 
-    /* not a string */
+    /* 合法性检查1：当前字符不是双引号 → 不是JSON字符串 */
     if (buffer_at_offset(input_buffer)[0] != '\"')
     {
         goto fail;
     }
 
     {
-        /* calculate approximate size of the output (overestimate) */
-        size_t allocation_length = 0;
-        size_t skipped_bytes = 0;
+        /* 预计算输出缓冲区大小（高估，避免频繁扩容） */
+        size_t allocation_length = 0;/*需分配的缓冲区大小*/
+        size_t skipped_bytes = 0;/*转义字符占用的额外字节数（如"\n"→1字节，原占2字节）*/
+        /*遍历字符串，直到结束双引号或缓冲区末尾*/
         while (((size_t)(input_end - input_buffer->content) < input_buffer->length) && (*input_end != '\"'))
         {
-            /* is escape sequence */
+            /* 遇到转义符\ */
             if (input_end[0] == '\\')
             {
+                /*合法性检查：转义符是最后一个字符 → 非法*/
                 if ((size_t)(input_end + 1 - input_buffer->content) >= input_buffer->length)
                 {
                     /* prevent buffer overflow when last input character is a backslash */
                     goto fail;
                 }
-                skipped_bytes++;
-                input_end++;
+                skipped_bytes++;/*转义符会减少最终输出长度，记录跳过的字节*/
+                input_end++;/*跳过转义符，指向转义字符（如\n的n）*/
             }
-            input_end++;
+            input_end++;/*移动到下一个字符*/
         }
+        /* 合法性检查2：遍历到缓冲区末尾仍未找到结束双引号 → 字符串未结束 */
         if (((size_t)(input_end - input_buffer->content) >= input_buffer->length) || (*input_end != '\"'))
         {
             goto fail; /* string ended unexpectedly */
         }
 
-        /* This is at most how much we need for the output */
+        /* 计算输出缓冲区大小：输入长度 - 跳过的转义字节 + 终止符 */
         allocation_length = (size_t) (input_end - buffer_at_offset(input_buffer)) - skipped_bytes;
         output = (unsigned char*)input_buffer->hooks.allocate(allocation_length + sizeof(""));
         if (output == NULL)
         {
-            goto fail; /* allocation failure */
+            goto fail; /* 内存分配失败 */
         }
     }
 
     output_pointer = output;
-    /* loop through the string literal */
+    /* 遍历字符串内容，处理转义并写入输出缓冲区 */
     while (input_pointer < input_end)
     {
+        /* 普通字符（非转义符）：直接拷贝 */
         if (*input_pointer != '\\')
         {
             *output_pointer++ = *input_pointer++;
         }
-        /* escape sequence */
+        /* 处理转义序列 */
         else
         {
-            unsigned char sequence_length = 2;
+            unsigned char sequence_length = 2;/*普通转义序列长度（\ + 字符 → 2字节）*/
+            /* 合法性检查：转义符后无字符 → 非法 */
             if ((input_end - input_pointer) < 1)
             {
                 goto fail;
             }
 
+            /* 根据转义字符类型处理 */
             switch (input_pointer[1])
             {
-                case 'b':
+                case 'b':/*退格符 \b → ASCII 0x08*/
                     *output_pointer++ = '\b';
                     break;
-                case 'f':
+                case 'f':/*换页符 \f → ASCII 0x0C*/
                     *output_pointer++ = '\f';
                     break;
-                case 'n':
+                case 'n':/*换行符 \n → ASCII 0x0A*/
                     *output_pointer++ = '\n';
                     break;
-                case 'r':
+                case 'r':/*回车符 \r → ASCII 0x0D*/
                     *output_pointer++ = '\r';
                     break;
-                case 't':
+                case 't':/*制表符 \t → ASCII 0x09*/
                     *output_pointer++ = '\t';
                     break;
                 case '\"':
@@ -1091,7 +1127,8 @@ static cJSON_bool parse_string(cJSON * const item, parse_buffer * const input_bu
                     break;
 
                 /* UTF-16 literal */
-                case 'u':
+                case 'u':/*UTF-16转义序列 \uXXXX*/
+                    /*转换为UTF-8，返回消耗的字节数（6/12）*/
                     sequence_length = utf16_literal_to_utf8(input_pointer, input_end, &output_pointer);
                     if (sequence_length == 0)
                     {
@@ -1100,31 +1137,33 @@ static cJSON_bool parse_string(cJSON * const item, parse_buffer * const input_bu
                     }
                     break;
 
-                default:
+                default:/*未知转义字符 → 非法*/
                     goto fail;
             }
-            input_pointer += sequence_length;
+            input_pointer += sequence_length;/*跳过已处理的转义序列*/
         }
     }
 
-    /* zero terminate the output */
+    /* 输出字符串添加终止符 '\0' */
     *output_pointer = '\0';
 
-    item->type = cJSON_String;
-    item->valuestring = (char*)output;
+    item->type = cJSON_String;/*标记节点类型为字符串*/
+    item->valuestring = (char*)output;/*指向无转义的字符串缓冲区*/
 
+    /* 更新解析缓冲区偏移量：跳过整个字符串（包括开头和结束双引号） */
     input_buffer->offset = (size_t) (input_end - input_buffer->content);
     input_buffer->offset++;
 
     return true;
 
 fail:
+    /* 失败清理：释放输出缓冲区 */
     if (output != NULL)
     {
         input_buffer->hooks.deallocate(output);
         output = NULL;
     }
-
+    /* 更新解析偏移量到错误位置，方便后续定位 */
     if (input_pointer != NULL)
     {
         input_buffer->offset = (size_t)(input_pointer - input_buffer->content);
@@ -1133,35 +1172,42 @@ fail:
     return false;
 }
 
-/* Render the cstring provided to an escaped version that can be printed. */
+/* 将C字符串渲染为JSON兼容的转义字符串（生成器核心函数）
+ * 作用：处理特殊字符转义（如"→\"、\n→\n），非ASCII字符转\uXXXX
+ * 参数：
+ *   input - 待转义的C字符串
+ *   output_buffer - 打印缓冲区（存储转义后的JSON字符串）
+ * 返回值：true=渲染成功；false=失败
+ */
 static cJSON_bool print_string_ptr(const unsigned char * const input, printbuffer * const output_buffer)
 {
-    const unsigned char *input_pointer = NULL;
-    unsigned char *output = NULL;
-    unsigned char *output_pointer = NULL;
-    size_t output_length = 0;
+    const unsigned char *input_pointer = NULL;/*输入字符串遍历指针*/
+    unsigned char *output = NULL;             /*输出缓冲区起始指针*/
+    unsigned char *output_pointer = NULL;     /*输出缓冲区写入指针*/
+    size_t output_length = 0;                 /*转义后的字符串长度*/
     /* numbers of additional characters needed for escaping */
-    size_t escape_characters = 0;
+    size_t escape_characters = 0;             /*转义需要的额外字符数（如\n→多1字节）*/
 
+    /* 合法性检查：缓冲区为空 → 失败 */
     if (output_buffer == NULL)
     {
         return false;
     }
 
-    /* empty string */
+    /* 处理空字符串：直接输出"" */
     if (input == NULL)
     {
-        output = ensure(output_buffer, sizeof("\"\""));
+        output = ensure(output_buffer, sizeof("\"\""));/*确保缓冲区有2字节（""）*/
         if (output == NULL)
         {
             return false;
         }
-        strcpy((char*)output, "\"\"");
+        strcpy((char*)output, "\"\"");/*写入空字符串*/
 
         return true;
     }
 
-    /* set "flag" to 1 if something needs to be escaped */
+    /* 第一步：统计需要转义的字符数，计算最终输出长度 */
     for (input_pointer = input; *input_pointer; input_pointer++)
     {
         switch (*input_pointer)
@@ -1173,27 +1219,28 @@ static cJSON_bool print_string_ptr(const unsigned char * const input, printbuffe
             case '\n':
             case '\r':
             case '\t':
-                /* one character escape sequence */
+                /* 单字符转义序列（\ + 字符 → 多1字节）*/
                 escape_characters++;
                 break;
             default:
                 if (*input_pointer < 32)
                 {
-                    /* UTF-16 escape sequence uXXXX */
+                    /* 控制字符（<32）：转\uXXXX → 多5字节（如\x01→\u0001） */
                     escape_characters += 5;
                 }
                 break;
         }
     }
-    output_length = (size_t)(input_pointer - input) + escape_characters;
+    output_length = (size_t)(input_pointer - input) + escape_characters;/*输出总长度 = 原字符串长度 + 转义额外字符数*/
 
+    /* 第二步：确保输出缓冲区有足够空间（+2为前后双引号 +1为终止符） */
     output = ensure(output_buffer, output_length + sizeof("\"\""));
     if (output == NULL)
     {
         return false;
     }
 
-    /* no characters have to be escaped */
+    /* 第三步：无转义字符 → 直接拷贝并添加双引号 */
     if (escape_characters == 0)
     {
         output[0] = '\"';
@@ -1204,11 +1251,13 @@ static cJSON_bool print_string_ptr(const unsigned char * const input, printbuffe
         return true;
     }
 
-    output[0] = '\"';
-    output_pointer = output + 1;
+    /* 第四步：有转义字符 → 逐字符处理转义 */
+    output[0] = '\"';/*开头双引号*/
+    output_pointer = output + 1;/*指向字符串内容起始*/
     /* copy the string */
     for (input_pointer = input; *input_pointer != '\0'; (void)input_pointer++, output_pointer++)
     {
+        /* 普通字符（可打印、非转义）：直接拷贝 */
         if ((*input_pointer > 31) && (*input_pointer != '\"') && (*input_pointer != '\\'))
         {
             /* normal character, copy */
@@ -1216,7 +1265,7 @@ static cJSON_bool print_string_ptr(const unsigned char * const input, printbuffe
         }
         else
         {
-            /* character needs to be escaped */
+            /* 特殊字符：转义处理 */
             *output_pointer++ = '\\';
             switch (*input_pointer)
             {
@@ -1255,13 +1304,23 @@ static cJSON_bool print_string_ptr(const unsigned char * const input, printbuffe
     return true;
 }
 
-/* Invoke print_string_ptr (which is useful) on an item. */
+/* 封装print_string_ptr，用于cJSON字符串节点的渲染
+ * 参数：item - cJSON字符串节点；p - 打印缓冲区
+ * 返回值：print_string_ptr的执行结果
+ */
 static cJSON_bool print_string(const cJSON * const item, printbuffer * const p)
 {
     return print_string_ptr((unsigned char*)item->valuestring, p);
 }
 
-/* Predeclare these prototypes. */
+/* 预声明核心解析/生成函数原型（解决循环依赖）
+ * parse_value：解析任意JSON值（字符串/数字/数组/对象/布尔/null）
+ * print_value：生成任意JSON值的字符串
+ * parse_array：解析JSON数组
+ * print_array：生成JSON数组的字符串
+ * parse_object：解析JSON对象
+ * print_object：生成JSON对象的字符串
+ */
 static cJSON_bool parse_value(cJSON * const item, parse_buffer * const input_buffer);
 static cJSON_bool print_value(const cJSON * const item, printbuffer * const output_buffer);
 static cJSON_bool parse_array(cJSON * const item, parse_buffer * const input_buffer);
@@ -1269,24 +1328,32 @@ static cJSON_bool print_array(const cJSON * const item, printbuffer * const outp
 static cJSON_bool parse_object(cJSON * const item, parse_buffer * const input_buffer);
 static cJSON_bool print_object(const cJSON * const item, printbuffer * const output_buffer);
 
-/* Utility to jump whitespace and cr/lf */
+/* 辅助函数：跳过空白字符（空格、制表符、换行、回车等）
+ * 作用：JSON语法忽略空白字符，解析前需跳过
+ * 参数：buffer - 解析缓冲区
+ * 返回值：跳过空白后的缓冲区指针（NULL=入参非法）
+ */
 static parse_buffer *buffer_skip_whitespace(parse_buffer * const buffer)
 {
+    /* 入参合法性检查 */
     if ((buffer == NULL) || (buffer->content == NULL))
     {
         return NULL;
     }
 
+    /* 缓冲区已到末尾 → 直接返回 */
     if (cannot_access_at_index(buffer, 0))
     {
         return buffer;
     }
 
+    /* 遍历并跳过所有空白字符（ASCII ≤32） */
     while (can_access_at_index(buffer, 0) && (buffer_at_offset(buffer)[0] <= 32))
     {
        buffer->offset++;
     }
 
+    /* 边界处理：若偏移量等于总长度，回退1位（避免越界） */
     if (buffer->offset == buffer->length)
     {
         buffer->offset--;
@@ -1295,14 +1362,20 @@ static parse_buffer *buffer_skip_whitespace(parse_buffer * const buffer)
     return buffer;
 }
 
-/* skip the UTF-8 BOM (byte order mark) if it is at the beginning of a buffer */
+/* 辅助函数：跳过UTF-8 BOM（字节顺序标记）
+ * 背景：部分文件开头会加EF BB BF（UTF-8 BOM），JSON解析需忽略
+ * 参数：buffer - 解析缓冲区（offset必须为0，即起始位置）
+ * 返回值：跳过BOM后的缓冲区指针（NULL=入参非法/无BOM）
+ */
 static parse_buffer *skip_utf8_bom(parse_buffer * const buffer)
 {
+    /* 入参合法性检查：缓冲区空/非起始位置 → 返回NULL */
     if ((buffer == NULL) || (buffer->content == NULL) || (buffer->offset != 0))
     {
         return NULL;
     }
 
+    /* 检查前3字节是否为EF BB BF（UTF-8 BOM） */
     if (can_access_at_index(buffer, 4) && (strncmp((const char*)buffer_at_offset(buffer), "\xEF\xBB\xBF", 3) == 0))
     {
         buffer->offset += 3;
@@ -1311,54 +1384,77 @@ static parse_buffer *skip_utf8_bom(parse_buffer * const buffer)
     return buffer;
 }
 
+/* JSON解析顶层接口（带选项）
+ * 作用：将JSON字符串解析为cJSON树形结构
+ * 参数：
+ *   value - 待解析的JSON字符串
+ *   return_parse_end - 输出参数，返回解析结束的位置（NULL=不返回）
+ *   require_null_terminated - 是否要求JSON字符串以\0结尾（true=不允许末尾有垃圾字符）
+ * 返回值：成功返回cJSON根节点；失败返回NULL
+ */
 CJSON_PUBLIC(cJSON *) cJSON_ParseWithOpts(const char *value, const char **return_parse_end, cJSON_bool require_null_terminated)
 {
     size_t buffer_length;
 
+    /* 入参合法性检查：字符串为空 → 返回NULL */
     if (NULL == value)
     {
         return NULL;
     }
 
-    /* Adding null character size due to require_null_terminated. */
+    /* 计算缓冲区长度：字符串长度 + 终止符（适应require_null_terminated） */
     buffer_length = strlen(value) + sizeof("");
 
+    /* 调用带长度的解析接口（核心解析逻辑） */
     return cJSON_ParseWithLengthOpts(value, buffer_length, return_parse_end, require_null_terminated);
 }
 
-/* Parse an object - create a new root, and populate. */
+/* JSON解析核心入口（带长度和选项）
+ * 参数：
+ *   value - 待解析的JSON字符串
+ *   buffer_length - 字符串长度（含终止符）
+ *   return_parse_end - 输出参数，返回解析结束位置
+ *   require_null_terminated - 是否要求严格以\0结尾
+ * 返回值：成功返回cJSON根节点；失败返回NULL
+ */
 CJSON_PUBLIC(cJSON *) cJSON_ParseWithLengthOpts(const char *value, size_t buffer_length, const char **return_parse_end, cJSON_bool require_null_terminated)
 {
     parse_buffer buffer = { 0, 0, 0, 0, { 0, 0, 0 } };
     cJSON *item = NULL;
 
-    /* reset error position */
+    /* 重置全局错误信息（解析前清空上次错误） */
     global_error.json = NULL;
     global_error.position = 0;
 
+    /* 入参合法性检查：字符串空/长度为0 → 失败 */
     if (value == NULL || 0 == buffer_length)
     {
         goto fail;
     }
 
+    /* 初始化解析缓冲区 */
     buffer.content = (const unsigned char*)value;
     buffer.length = buffer_length;
     buffer.offset = 0;
     buffer.hooks = global_hooks;
 
+    /* 创建根cJSON节点（解析的起点） */
     item = cJSON_New_Item(&global_hooks);
-    if (item == NULL) /* memory fail */
+    if (item == NULL) /* 内存分配失败 */
     {
         goto fail;
     }
 
+    /* 核心解析逻辑：
+     * 1. 跳过UTF-8 BOM → 2. 跳过空白字符 → 3. 解析JSON值（递归解析）
+     */
     if (!parse_value(item, buffer_skip_whitespace(skip_utf8_bom(&buffer))))
     {
         /* parse failure. ep is set. */
         goto fail;
     }
 
-    /* if we require null-terminated JSON without appended garbage, skip and then check for a null terminator */
+    /* 严格模式检查：要求JSON字符串以\0结尾，无末尾垃圾字符 */
     if (require_null_terminated)
     {
         buffer_skip_whitespace(&buffer);
@@ -1367,25 +1463,30 @@ CJSON_PUBLIC(cJSON *) cJSON_ParseWithLengthOpts(const char *value, size_t buffer
             goto fail;
         }
     }
+    /* 输出解析结束位置（若需要） */
     if (return_parse_end)
     {
         *return_parse_end = (const char*)buffer_at_offset(&buffer);
     }
 
+    /* 输出解析结束位置（若需要） */
     return item;
 
 fail:
+    /* 失败清理：释放已创建的cJSON节点 */
     if (item != NULL)
     {
         cJSON_Delete(item);
     }
 
+    /* 记录错误位置，方便用户定位 */
     if (value != NULL)
     {
         error local_error;
         local_error.json = (const unsigned char*)value;
         local_error.position = 0;
 
+        /* 定位错误位置：优先用解析偏移量，否则用缓冲区末尾 */
         if (buffer.offset < buffer.length)
         {
             local_error.position = buffer.offset;
@@ -1395,11 +1496,13 @@ fail:
             local_error.position = buffer.length - 1;
         }
 
+        /* 输出解析结束位置（失败时指向错误位置） */
         if (return_parse_end != NULL)
         {
             *return_parse_end = (const char*)local_error.json + local_error.position;
         }
 
+        /* 更新全局错误信息 */
         global_error = local_error;
     }
 
