@@ -1509,64 +1509,89 @@ fail:
     return NULL;
 }
 
-/* Default options for cJSON_Parse */
+/* cJSON_Parse 默认选项封装：无解析结束位置返回、不要求严格\0结尾
+ * 作用：提供简化的JSON解析入口，适配大多数基础场景
+ * 参数：value - 待解析的JSON字符串
+ * 返回值：成功返回cJSON根节点；失败返回NULL
+ */
 CJSON_PUBLIC(cJSON *) cJSON_Parse(const char *value)
 {
+    // 调用带选项的解析接口，return_parse_end=0，require_null_terminated=0
     return cJSON_ParseWithOpts(value, 0, 0);
 }
 
+/* 带长度的JSON解析接口（无选项）
+ * 作用：支持解析非\0结尾的JSON字符串（通过指定长度）
+ * 参数：
+ *   value - 待解析的JSON字符串
+ *   buffer_length - 字符串长度（不含终止符也可）
+ * 返回值：成功返回cJSON根节点；失败返回NULL
+ */
 CJSON_PUBLIC(cJSON *) cJSON_ParseWithLength(const char *value, size_t buffer_length)
 {
     return cJSON_ParseWithLengthOpts(value, buffer_length, 0, 0);
 }
 
+/* 最小值宏：返回a和b中的较小值
+ * 作用：内存拷贝时防止越界（如缓冲区长度 < 需拷贝长度时，取较小值）
+ */
 #define cjson_min(a, b) (((a) < (b)) ? (a) : (b))
 
+/* JSON生成器核心函数：将cJSON节点转为JSON字符串（内部接口）
+ * 参数：
+ *   item - 待生成的cJSON根节点
+ *   format - 是否格式化输出（true=带缩进/空格，false=紧凑格式）
+ *   hooks - 内存钩子（指定分配/释放函数）
+ * 返回值：成功返回JSON字符串（需手动释放）；失败返回NULL
+ */
 static unsigned char *print(const cJSON * const item, cJSON_bool format, const internal_hooks * const hooks)
 {
     static const size_t default_buffer_size = 256;
     printbuffer buffer[1];
     unsigned char *printed = NULL;
 
+    /* 初始化打印缓冲区为0（避免野指针）*/
     memset(buffer, 0, sizeof(buffer));
 
-    /* create buffer */
-    buffer->buffer = (unsigned char*) hooks->allocate(default_buffer_size);
-    buffer->length = default_buffer_size;
-    buffer->format = format;
-    buffer->hooks = *hooks;
+    /* 第一步：创建初始打印缓冲区 */
+    buffer->buffer = (unsigned char*) hooks->allocate(default_buffer_size);/*分配初始内存*/
+    buffer->length = default_buffer_size;/*缓冲区总长度*/
+    buffer->format = format;/*格式化标记*/
+    buffer->hooks = *hooks;/*拷贝内存钩子*/
     if (buffer->buffer == NULL)
     {
         goto fail;
     }
 
-    /* print the value */
+    /* 第二步：核心生成逻辑：将cJSON节点转为字符串写入缓冲区 */
     if (!print_value(item, buffer))
     {
         goto fail;
     }
     update_offset(buffer);
 
-    /* check if reallocate is available */
+    /* 第三步：优化缓冲区大小（缩容到实际使用长度） */
     if (hooks->reallocate != NULL)
     {
+        /*有realloc函数：直接缩容（效率更高，无需拷贝）*/
         printed = (unsigned char*) hooks->reallocate(buffer->buffer, buffer->offset + 1);
         if (printed == NULL) {
             goto fail;
         }
-        buffer->buffer = NULL;
+        buffer->buffer = NULL;/*原缓冲区已被realloc接管，置空避免重复释放*/
     }
-    else /* otherwise copy the JSON over to a new buffer */
+    else /*无realloc函数：手动分配新缓冲区 + 拷贝数据 + 释放原缓冲区 */
     {
         printed = (unsigned char*) hooks->allocate(buffer->offset + 1);
         if (printed == NULL)
         {
             goto fail;
         }
+        /*拷贝数据（取缓冲区长度和实际使用长度的较小值，防止越界）*/
         memcpy(printed, buffer->buffer, cjson_min(buffer->length, buffer->offset + 1));
         printed[buffer->offset] = '\0'; /* just to be sure */
 
-        /* free the buffer */
+        /* 释放原缓冲区 */
         hooks->deallocate(buffer->buffer);
         buffer->buffer = NULL;
     }
@@ -1574,6 +1599,7 @@ static unsigned char *print(const cJSON * const item, cJSON_bool format, const i
     return printed;
 
 fail:
+    /* 失败清理：释放缓冲区和已分配的字符串 */
     if (buffer->buffer != NULL)
     {
         hooks->deallocate(buffer->buffer);
@@ -1589,17 +1615,36 @@ fail:
     return NULL;
 }
 
-/* Render a cJSON item/entity/structure to text. */
+/* 格式化输出JSON字符串（公共接口）
+ * 作用：将cJSON节点转为带缩进/空格的易读JSON字符串
+ * 参数：item - cJSON根节点
+ * 返回值：成功返回JSON字符串（需调用free释放）；失败返回NULL
+ */
 CJSON_PUBLIC(char *) cJSON_Print(const cJSON *item)
 {
+    /*调用内部print函数，format=true（格式化），使用全局内存钩子*/
     return (char*)print(item, true, &global_hooks);
 }
 
+/* 非格式化输出JSON字符串（公共接口）
+ * 作用：将cJSON节点转为紧凑的JSON字符串（无多余空格/换行）
+ * 参数：item - cJSON根节点
+ * 返回值：成功返回JSON字符串（需调用free释放）；失败返回NULL
+ */
 CJSON_PUBLIC(char *) cJSON_PrintUnformatted(const cJSON *item)
 {
+    /*调用内部print函数，format=false（紧凑），使用全局内存钩子*/
     return (char*)print(item, false, &global_hooks);
 }
 
+/* 预分配缓冲区的JSON输出接口
+ * 作用：用户指定初始缓冲区大小，减少动态扩容，提升性能
+ * 参数：
+ *   item - cJSON根节点
+ *   prebuffer - 初始缓冲区大小（字节）
+ *   fmt - 是否格式化输出
+ * 返回值：成功返回JSON字符串（需调用free释放）；失败返回NULL
+ */
 CJSON_PUBLIC(char *) cJSON_PrintBuffered(const cJSON *item, int prebuffer, cJSON_bool fmt)
 {
     printbuffer p = { 0, 0, 0, 0, 0, 0, { 0, 0, 0 } };
@@ -1631,6 +1676,15 @@ CJSON_PUBLIC(char *) cJSON_PrintBuffered(const cJSON *item, int prebuffer, cJSON
     return (char*)p.buffer;
 }
 
+/* 预分配缓冲区的JSON输出接口（不动态扩容）
+ * 作用：使用用户提供的缓冲区，避免内存分配，适配嵌入式/内存受限场景
+ * 参数：
+ *   item - cJSON根节点
+ *   buffer - 用户提供的输出缓冲区
+ *   length - 缓冲区长度（字节）
+ *   format - 是否格式化输出
+ * 返回值：true=生成成功；false=失败（缓冲区不足/入参非法）
+ */
 CJSON_PUBLIC(cJSON_bool) cJSON_PrintPreallocated(cJSON *item, char *buffer, const int length, const cJSON_bool format)
 {
     printbuffer p = { 0, 0, 0, 0, 0, 0, { 0, 0, 0 } };
@@ -1650,7 +1704,13 @@ CJSON_PUBLIC(cJSON_bool) cJSON_PrintPreallocated(cJSON *item, char *buffer, cons
     return print_value(item, &p);
 }
 
-/* Parser core - when encountering text, process appropriately. */
+/* 解析器核心：根据当前字符解析对应的JSON值类型（递归入口）
+ * 作用：分发解析逻辑到具体类型（null/布尔/字符串/数字/数组/对象）
+ * 参数：
+ *   item - 待填充的cJSON节点
+ *   input_buffer - 解析缓冲区
+ * 返回值：true=解析成功；false=解析失败
+ */
 static cJSON_bool parse_value(cJSON * const item, parse_buffer * const input_buffer)
 {
     if ((input_buffer == NULL) || (input_buffer->content == NULL))
@@ -1658,7 +1718,7 @@ static cJSON_bool parse_value(cJSON * const item, parse_buffer * const input_buf
         return false; /* no input */
     }
 
-    /* parse the different types of values */
+    /* 按JSON语法依次匹配值类型 */
     /* null */
     if (can_read(input_buffer, 4) && (strncmp((const char*)buffer_at_offset(input_buffer), "null", 4) == 0))
     {
@@ -1705,7 +1765,13 @@ static cJSON_bool parse_value(cJSON * const item, parse_buffer * const input_buf
     return false;
 }
 
-/* Render a value to text. */
+/* 生成器核心：根据cJSON节点类型生成对应的JSON字符串（递归入口）
+ * 作用：分发生成逻辑到具体类型（null/布尔/数字/字符串/数组/对象）
+ * 参数：
+ *   item - 待生成的cJSON节点
+ *   output_buffer - 打印缓冲区
+ * 返回值：true=生成成功；false=失败
+ */
 static cJSON_bool print_value(const cJSON * const item, printbuffer * const output_buffer)
 {
     unsigned char *output = NULL;
@@ -1715,6 +1781,7 @@ static cJSON_bool print_value(const cJSON * const item, printbuffer * const outp
         return false;
     }
 
+    /* 按节点类型分发生成逻辑（仅取低8位，屏蔽扩展标记） */
     switch ((item->type) & 0xFF)
     {
         case cJSON_NULL:
@@ -1779,18 +1846,25 @@ static cJSON_bool print_value(const cJSON * const item, printbuffer * const outp
     }
 }
 
-/* Build an array from input text. */
+/* 解析JSON数组（核心函数）：将[元素1,元素2,...]解析为cJSON数组节点
+ * 参数：
+ *   item - 待填充的cJSON数组节点
+ *   input_buffer - 解析缓冲区
+ * 返回值：true=解析成功；false=失败
+ */
 static cJSON_bool parse_array(cJSON * const item, parse_buffer * const input_buffer)
 {
-    cJSON *head = NULL; /* head of the linked list */
+    cJSON *head = NULL; /* 数组元素链表头节点 */
     cJSON *current_item = NULL;
 
+    /*嵌套深度检查：超过限制 → 失败（防止栈溢出/恶意嵌套）*/
     if (input_buffer->depth >= CJSON_NESTING_LIMIT)
     {
         return false; /* to deeply nested */
     }
     input_buffer->depth++;
 
+    /*合法性检查：当前字符不是[ → 不是数组*/
     if (buffer_at_offset(input_buffer)[0] != '[')
     {
         /* not an array */
@@ -1799,56 +1873,58 @@ static cJSON_bool parse_array(cJSON * const item, parse_buffer * const input_buf
 
     input_buffer->offset++;
     buffer_skip_whitespace(input_buffer);
+    /*处理空数组（[后直接]）*/
     if (can_access_at_index(input_buffer, 0) && (buffer_at_offset(input_buffer)[0] == ']'))
     {
         /* empty array */
         goto success;
     }
 
-    /* check if we skipped to the end of the buffer */
+    /* 边界检查：跳过空白后到缓冲区末尾 → 失败 */
     if (cannot_access_at_index(input_buffer, 0))
     {
         input_buffer->offset--;
         goto fail;
     }
 
-    /* step back to character in front of the first element */
+    /* 回退偏移量（为后续循环做准备） */
     input_buffer->offset--;
-    /* loop through the comma separated array elements */
+    /* 循环解析数组元素（逗号分隔）*/
     do
     {
-        /* allocate next item */
+        /* 创建新元素节点 */
         cJSON *new_item = cJSON_New_Item(&(input_buffer->hooks));
         if (new_item == NULL)
         {
-            goto fail; /* allocation failure */
+            goto fail; /* 内存分配失败 */
         }
 
-        /* attach next item to list */
+        /* 将新节点加入链表 */
         if (head == NULL)
         {
-            /* start the linked list */
+            /* 第一个元素：初始化链表头 */
             current_item = head = new_item;
         }
         else
         {
-            /* add to the end and advance */
+            /* 后续元素：追加到链表末尾 */
             current_item->next = new_item;
             new_item->prev = current_item;
             current_item = new_item;
         }
 
-        /* parse next value */
+        /* 解析当前元素值 */
         input_buffer->offset++;
         buffer_skip_whitespace(input_buffer);
         if (!parse_value(current_item, input_buffer))
         {
-            goto fail; /* failed to parse value */
+            goto fail; /* 元素解析失败 */
         }
         buffer_skip_whitespace(input_buffer);
     }
     while (can_access_at_index(input_buffer, 0) && (buffer_at_offset(input_buffer)[0] == ','));
 
+    /*合法性检查：无结束符] → 失败*/
     if (cannot_access_at_index(input_buffer, 0) || buffer_at_offset(input_buffer)[0] != ']')
     {
         goto fail; /* expected end of array */
@@ -1857,10 +1933,12 @@ static cJSON_bool parse_array(cJSON * const item, parse_buffer * const input_buf
 success:
     input_buffer->depth--;
 
+    /*链表闭环（头节点的prev指向尾节点）*/
     if (head != NULL) {
         head->prev = current_item;
     }
 
+    /*填充数组节点*/
     item->type = cJSON_Array;
     item->child = head;
 
@@ -1869,6 +1947,7 @@ success:
     return true;
 
 fail:
+    /*失败清理：释放已创建的元素节点*/
     if (head != NULL)
     {
         cJSON_Delete(head);
@@ -1877,20 +1956,25 @@ fail:
     return false;
 }
 
-/* Render an array to text */
+/* 生成JSON数组字符串（核心函数）：将cJSON数组节点转为[元素1,元素2,...]
+ * 参数：
+ *   item - cJSON数组节点
+ *   output_buffer - 打印缓冲区
+ * 返回值：true=生成成功；false=失败
+ */
 static cJSON_bool print_array(const cJSON * const item, printbuffer * const output_buffer)
 {
-    unsigned char *output_pointer = NULL;
-    size_t length = 0;
-    cJSON *current_element = item->child;
+    unsigned char *output_pointer = NULL;  /*缓冲区写入指针*/
+    size_t length = 0;                     /*需分配的缓冲区长度*/
+    cJSON *current_element = item->child;  /*当前遍历的数组元素*/
 
+    /*入参合法性检查：缓冲区空 → 失败*/
     if (output_buffer == NULL)
     {
         return false;
     }
 
-    /* Compose the output array. */
-    /* opening square bracket */
+    /* 第一步：生成数组开头[ */
     output_pointer = ensure(output_buffer, 1);
     if (output_pointer == NULL)
     {
@@ -1901,15 +1985,19 @@ static cJSON_bool print_array(const cJSON * const item, printbuffer * const outp
     output_buffer->offset++;
     output_buffer->depth++;
 
+    /* 第二步：循环生成数组元素 */
     while (current_element != NULL)
     {
+        /*生成当前元素的JSON字符串*/
         if (!print_value(current_element, output_buffer))
         {
             return false;
         }
         update_offset(output_buffer);
+        /*有下一个元素：添加分隔符（, 或 , ）*/
         if (current_element->next)
         {
+            /*格式化：, + 空格（2字节）；紧凑：,（1字节）*/
             length = (size_t) (output_buffer->format ? 2 : 1);
             output_pointer = ensure(output_buffer, length + 1);
             if (output_pointer == NULL)
@@ -1924,9 +2012,10 @@ static cJSON_bool print_array(const cJSON * const item, printbuffer * const outp
             *output_pointer = '\0';
             output_buffer->offset += length;
         }
-        current_element = current_element->next;
+        current_element = current_element->next;/*遍历下一个元素*/
     }
 
+    /* 第三步：生成数组结尾] */
     output_pointer = ensure(output_buffer, 2);
     if (output_pointer == NULL)
     {
@@ -1939,18 +2028,25 @@ static cJSON_bool print_array(const cJSON * const item, printbuffer * const outp
     return true;
 }
 
-/* Build an object from the text. */
+/* 解析JSON对象（核心函数）：将{key1:value1,key2:value2,...}解析为cJSON对象节点
+ * 参数：
+ *   item - 待填充的cJSON对象节点
+ *   input_buffer - 解析缓冲区
+ * 返回值：true=解析成功；false=失败
+ */
 static cJSON_bool parse_object(cJSON * const item, parse_buffer * const input_buffer)
 {
-    cJSON *head = NULL; /* linked list head */
-    cJSON *current_item = NULL;
+    cJSON *head = NULL; /* 对象键值对链表头节点 */
+    cJSON *current_item = NULL;/*当前解析的键值对节点*/
 
+    /*嵌套深度检查：超过限制 → 失败（防止栈溢出/恶意嵌套）*/
     if (input_buffer->depth >= CJSON_NESTING_LIMIT)
     {
         return false; /* to deeply nested */
     }
     input_buffer->depth++;
 
+    /*合法性检查：缓冲区空 或 当前字符不是{ → 不是对象*/
     if (cannot_access_at_index(input_buffer, 0) || (buffer_at_offset(input_buffer)[0] != '{'))
     {
         goto fail; /* not an object */
@@ -1958,50 +2054,52 @@ static cJSON_bool parse_object(cJSON * const item, parse_buffer * const input_bu
 
     input_buffer->offset++;
     buffer_skip_whitespace(input_buffer);
+    /*处理空对象（{后直接}）*/
     if (can_access_at_index(input_buffer, 0) && (buffer_at_offset(input_buffer)[0] == '}'))
     {
         goto success; /* empty object */
     }
 
-    /* check if we skipped to the end of the buffer */
+    /* 边界检查：跳过空白后到缓冲区末尾 → 失败 */
     if (cannot_access_at_index(input_buffer, 0))
     {
         input_buffer->offset--;
         goto fail;
     }
 
-    /* step back to character in front of the first element */
+    /* 回退偏移量（为后续循环做准备） */
     input_buffer->offset--;
-    /* loop through the comma separated array elements */
+    /* 循环解析对象的键值对（逗号分隔） */
     do
     {
-        /* allocate next item */
+        /* 创建新键值对节点 */
         cJSON *new_item = cJSON_New_Item(&(input_buffer->hooks));
         if (new_item == NULL)
         {
-            goto fail; /* allocation failure */
+            goto fail; /* 内存分配失败 */
         }
 
-        /* attach next item to list */
+        /* 将新节点加入链表 */
         if (head == NULL)
         {
-            /* start the linked list */
+            /* 第一个键值对：初始化链表头 */
             current_item = head = new_item;
         }
         else
         {
-            /* add to the end and advance */
+            /* 后续键值对：追加到链表末尾 */
             current_item->next = new_item;
             new_item->prev = current_item;
             current_item = new_item;
         }
 
+        /*合法性检查：逗号后无字符 → 失败*/
         if (cannot_access_at_index(input_buffer, 1))
         {
             goto fail; /* nothing comes after the comma */
         }
 
-        /* parse the name of the child */
+        /* 第一步：解析键名（JSON字符串） */
         input_buffer->offset++;
         buffer_skip_whitespace(input_buffer);
         if (!parse_string(current_item, input_buffer))
@@ -2010,16 +2108,20 @@ static cJSON_bool parse_object(cJSON * const item, parse_buffer * const input_bu
         }
         buffer_skip_whitespace(input_buffer);
 
-        /* swap valuestring and string, because we parsed the name */
+        /* 交换valuestring和string：
+         * - parse_string会将键名存入valuestring
+         * - cJSON对象节点的键名需存在string字段，值存在valuestring/valueint等
+         */
         current_item->string = current_item->valuestring;
         current_item->valuestring = NULL;
 
+        /*合法性检查：键名后无字符 或 不是冒号: → 非法对象*/
         if (cannot_access_at_index(input_buffer, 0) || (buffer_at_offset(input_buffer)[0] != ':'))
         {
             goto fail; /* invalid object */
         }
 
-        /* parse the value */
+        /* 第二步：解析键值（任意JSON值） */
         input_buffer->offset++;
         buffer_skip_whitespace(input_buffer);
         if (!parse_value(current_item, input_buffer))
@@ -2028,8 +2130,9 @@ static cJSON_bool parse_object(cJSON * const item, parse_buffer * const input_bu
         }
         buffer_skip_whitespace(input_buffer);
     }
-    while (can_access_at_index(input_buffer, 0) && (buffer_at_offset(input_buffer)[0] == ','));
+    while (can_access_at_index(input_buffer, 0) && (buffer_at_offset(input_buffer)[0] == ','));/*有逗号则继续解析*/
 
+    /*合法性检查：无结束符} → 失败*/
     if (cannot_access_at_index(input_buffer, 0) || (buffer_at_offset(input_buffer)[0] != '}'))
     {
         goto fail; /* expected end of object */
@@ -2038,10 +2141,12 @@ static cJSON_bool parse_object(cJSON * const item, parse_buffer * const input_bu
 success:
     input_buffer->depth--;
 
+    /*链表闭环（头节点的prev指向尾节点）*/
     if (head != NULL) {
         head->prev = current_item;
     }
 
+    /*填充对象节点*/
     item->type = cJSON_Object;
     item->child = head;
 
@@ -2057,19 +2162,28 @@ fail:
     return false;
 }
 
-/* Render an object to text. */
+/* 生成JSON对象字符串（核心函数）：将cJSON对象节点转为{key1:value1,key2:value2,...}
+ * 参数：
+ *   item - cJSON对象节点
+ *   output_buffer - 打印缓冲区
+ * 返回值：true=生成成功；false=失败
+ */
 static cJSON_bool print_object(const cJSON * const item, printbuffer * const output_buffer)
 {
-    unsigned char *output_pointer = NULL;
-    size_t length = 0;
-    cJSON *current_item = item->child;
+    unsigned char *output_pointer = NULL;/*缓冲区写入指针*/
+    size_t length = 0;                   /*需分配的缓冲区长度*/
+    cJSON *current_item = item->child;   /*当前遍历的键值对*/
 
+    /*入参合法性检查：缓冲区空 → 失败*/
     if (output_buffer == NULL)
     {
         return false;
     }
 
-    /* Compose the output: */
+    /* 第一步：生成对象开头{
+     * - 格式化：{ + \n（2字节）
+     * - 紧凑：{（1字节）
+     */
     length = (size_t) (output_buffer->format ? 2 : 1); /* fmt: {\n */
     output_pointer = ensure(output_buffer, length + 1);
     if (output_pointer == NULL)
@@ -2085,8 +2199,10 @@ static cJSON_bool print_object(const cJSON * const item, printbuffer * const out
     }
     output_buffer->offset += length;
 
+    /* 第二步：循环生成键值对 */
     while (current_item)
     {
+        /*格式化：添加缩进（深度=当前嵌套深度的制表符）*/
         if (output_buffer->format)
         {
             size_t i;
@@ -2102,13 +2218,16 @@ static cJSON_bool print_object(const cJSON * const item, printbuffer * const out
             output_buffer->offset += output_buffer->depth;
         }
 
-        /* print key */
+        /* 生成键名字符串（JSON格式，带双引号） */
         if (!print_string_ptr((unsigned char*)current_item->string, output_buffer))
         {
             return false;
         }
         update_offset(output_buffer);
 
+        /*生成冒号分隔符：
+         *- 格式化：: + \t（2字节）
+         *- 紧凑：:（1字节） */
         length = (size_t) (output_buffer->format ? 2 : 1);
         output_pointer = ensure(output_buffer, length);
         if (output_pointer == NULL)
@@ -2122,14 +2241,16 @@ static cJSON_bool print_object(const cJSON * const item, printbuffer * const out
         }
         output_buffer->offset += length;
 
-        /* print value */
+        /* 生成键值（任意JSON值） */
         if (!print_value(current_item, output_buffer))
         {
             return false;
         }
         update_offset(output_buffer);
 
-        /* print comma if not last */
+        /* 生成分隔符（逗号+换行 或 空）
+         * length = 格式化换行(1) + 下一个元素则加逗号(1)
+         */
         length = ((size_t)(output_buffer->format ? 1 : 0) + (size_t)(current_item->next ? 1 : 0));
         output_pointer = ensure(output_buffer, length + 1);
         if (output_pointer == NULL)
@@ -2138,12 +2259,12 @@ static cJSON_bool print_object(const cJSON * const item, printbuffer * const out
         }
         if (current_item->next)
         {
-            *output_pointer++ = ',';
+            *output_pointer++ = ',';/*非最后一个键值对，加逗号*/
         }
 
         if (output_buffer->format)
         {
-            *output_pointer++ = '\n';
+            *output_pointer++ = '\n';/*格式化时换行*/
         }
         *output_pointer = '\0';
         output_buffer->offset += length;
@@ -2151,11 +2272,15 @@ static cJSON_bool print_object(const cJSON * const item, printbuffer * const out
         current_item = current_item->next;
     }
 
+    /* 第三步：生成对象结尾} 
+     * 需分配的长度：格式化=缩进长度+1（}）；紧凑=2（} + \0）
+     */
     output_pointer = ensure(output_buffer, output_buffer->format ? (output_buffer->depth + 1) : 2);
     if (output_pointer == NULL)
     {
         return false;
     }
+    /*格式化：添加缩进（深度-1个制表符）*/
     if (output_buffer->format)
     {
         size_t i;
@@ -2171,12 +2296,16 @@ static cJSON_bool print_object(const cJSON * const item, printbuffer * const out
     return true;
 }
 
-/* Get Array size/item / object item. */
+/* 获取JSON数组的元素个数（公共接口）
+ * 参数：array - cJSON数组节点
+ * 返回值：成功返回元素个数；失败/空数组返回0（注意：数组过大时可能溢出int）
+ */
 CJSON_PUBLIC(int) cJSON_GetArraySize(const cJSON *array)
 {
     cJSON *child = NULL;
     size_t size = 0;
 
+    /*入参合法性检查：数组节点空 → 返回0*/
     if (array == NULL)
     {
         return 0;
@@ -2184,17 +2313,24 @@ CJSON_PUBLIC(int) cJSON_GetArraySize(const cJSON *array)
 
     child = array->child;
 
+    /*遍历链表，统计元素个数*/
     while(child != NULL)
     {
         size++;
         child = child->next;
     }
 
-    /* FIXME: Can overflow here. Cannot be fixed without breaking the API */
+    /* 注意：此处有溢出风险（size_t转int），但为了兼容旧API无法修改 */
 
     return (int)size;
 }
 
+/* 内部接口：按索引获取数组元素（size_t版，避免int溢出）
+ * 参数：
+ *   array - cJSON数组节点
+ *   index - 元素索引（从0开始）
+ * 返回值：成功返回对应元素节点；失败返回NULL
+ */
 static cJSON* get_array_item(const cJSON *array, size_t index)
 {
     cJSON *current_child = NULL;
@@ -2214,6 +2350,12 @@ static cJSON* get_array_item(const cJSON *array, size_t index)
     return current_child;
 }
 
+/* 公共接口：按索引获取数组元素（int版）
+ * 参数：
+ *   array - cJSON数组节点
+ *   index - 元素索引（从0开始，负数返回NULL）
+ * 返回值：成功返回对应元素节点；失败返回NULL
+ */
 CJSON_PUBLIC(cJSON *) cJSON_GetArrayItem(const cJSON *array, int index)
 {
     if (index < 0)
@@ -2224,6 +2366,13 @@ CJSON_PUBLIC(cJSON *) cJSON_GetArrayItem(const cJSON *array, int index)
     return get_array_item(array, (size_t)index);
 }
 
+/* 内部接口：按键名获取对象的键值对节点
+ * 参数：
+ *   object - cJSON对象节点
+ *   name - 要查找的键名
+ *   case_sensitive - 是否大小写敏感（true=敏感，false=不敏感）
+ * 返回值：成功返回对应节点；失败返回NULL
+ */
 static cJSON *get_object_item(const cJSON * const object, const char * const name, const cJSON_bool case_sensitive)
 {
     cJSON *current_element = NULL;
@@ -2236,6 +2385,7 @@ static cJSON *get_object_item(const cJSON * const object, const char * const nam
     current_element = object->child;
     if (case_sensitive)
     {
+        /*大小写敏感：用strcmp比较*/
         while ((current_element != NULL) && (current_element->string != NULL) && (strcmp(name, current_element->string) != 0))
         {
             current_element = current_element->next;
@@ -2243,12 +2393,14 @@ static cJSON *get_object_item(const cJSON * const object, const char * const nam
     }
     else
     {
+        /*大小写不敏感：用自定义的不敏感比较函数*/
         while ((current_element != NULL) && (case_insensitive_strcmp((const unsigned char*)name, (const unsigned char*)(current_element->string)) != 0))
         {
             current_element = current_element->next;
         }
     }
 
+    /*检查：找到的节点必须有键名（避免空节点）*/
     if ((current_element == NULL) || (current_element->string == NULL)) {
         return NULL;
     }
