@@ -2408,96 +2408,149 @@ static cJSON *get_object_item(const cJSON * const object, const char * const nam
     return current_element;
 }
 
+/* 公共接口：按键名获取对象节点（大小写不敏感）
+ * 作用：兼容大多数场景的对象查询，忽略键名大小写
+ * 参数：
+ *   object - cJSON对象节点
+ *   string - 要查找的键名
+ * 返回值：成功返回对应节点；失败返回NULL
+ */
 CJSON_PUBLIC(cJSON *) cJSON_GetObjectItem(const cJSON * const object, const char * const string)
 {
     return get_object_item(object, string, false);
 }
 
+/* 公共接口：按键名获取对象节点（大小写敏感）
+ * 作用：精准匹配键名大小写，适用于严格场景
+ * 参数：
+ *   object - cJSON对象节点
+ *   string - 要查找的键名
+ * 返回值：成功返回对应节点；失败返回NULL
+ */
 CJSON_PUBLIC(cJSON *) cJSON_GetObjectItemCaseSensitive(const cJSON * const object, const char * const string)
 {
     return get_object_item(object, string, true);
 }
 
+/* 公共接口：检查对象是否包含指定键名（大小写不敏感）
+ * 作用：快速判断键是否存在，无需获取完整节点
+ * 参数：
+ *   object - cJSON对象节点
+ *   string - 要检查的键名
+ * 返回值：1=存在；0=不存在
+ */
 CJSON_PUBLIC(cJSON_bool) cJSON_HasObjectItem(const cJSON *object, const char *string)
 {
     return cJSON_GetObjectItem(object, string) ? 1 : 0;
 }
 
-/* Utility for array list handling. */
+/* 工具函数：将节点追加到链表末尾（维护双向链表关系）
+ * 作用：辅助数组/对象添加节点，设置prev/next指针
+ * 参数：
+ *   prev - 链表尾节点
+ *   item - 待追加的新节点
+ */
 static void suffix_object(cJSON *prev, cJSON *item)
 {
     prev->next = item;
     item->prev = prev;
 }
 
-/* Utility for handling references. */
+/* 工具函数：创建节点的引用（浅拷贝）
+ * 作用：避免深拷贝，仅引用原节点数据，节省内存
+ * 参数：
+ *   item - 被引用的原节点
+ *   hooks - 内存钩子
+ * 返回值：成功返回引用节点；失败返回NULL
+ */
 static cJSON *create_reference(const cJSON *item, const internal_hooks * const hooks)
 {
     cJSON *reference = NULL;
+    /*入参合法性检查：原节点空 → 返回NULL*/
     if (item == NULL)
     {
         return NULL;
     }
 
+    /*创建新节点（引用节点）*/
     reference = cJSON_New_Item(hooks);
     if (reference == NULL)
     {
         return NULL;
     }
 
+    /*浅拷贝原节点所有字段（共享数据，不拷贝字符串）*/
     memcpy(reference, item, sizeof(cJSON));
-    reference->string = NULL;
-    reference->type |= cJSON_IsReference;
-    reference->next = reference->prev = NULL;
+    reference->string = NULL;                /*引用节点不持有键名字符串*/
+    reference->type |= cJSON_IsReference;    /*标记为引用类型*/
+    reference->next = reference->prev = NULL;/*重置链表指针*/
     return reference;
 }
 
+/* 内部接口：将节点添加到数组末尾
+ * 作用：维护数组的双向链表结构，支持空数组/非空数组
+ * 参数：
+ *   array - cJSON数组节点
+ *   item - 待添加的新节点
+ * 返回值：true=成功；false=失败
+ */
 static cJSON_bool add_item_to_array(cJSON *array, cJSON *item)
 {
     cJSON *child = NULL;
 
+    /*入参合法性检查：节点空/数组空/自引用 → 失败*/
     if ((item == NULL) || (array == NULL) || (array == item))
     {
         return false;
     }
 
-    child = array->child;
-    /*
-     * To find the last item in array quickly, we use prev in array
-     */
+    child = array->child;/*指向数组第一个元素*/
+    
+    /* 优化：利用child->prev快速找到数组最后一个元素（闭环链表） */
     if (child == NULL)
     {
         /* list is empty, start new one */
-        array->child = item;
-        item->prev = item;
-        item->next = NULL;
+        array->child = item;/*数组child指向新节点*/
+        item->prev = item;  /*新节点prev自指向（标记尾节点）*/
+        item->next = NULL;  /*新节点next为空*/
     }
     else
     {
-        /* append to the end */
+        /* 非空数组：追加到末尾 */
         if (child->prev)
         {
-            suffix_object(child->prev, item);
-            array->child->prev = item;
+            suffix_object(child->prev, item);/*尾节点追加新节点*/
+            array->child->prev = item;       /*更新头节点prev指向新尾节点*/
         }
     }
 
     return true;
 }
 
-/* Add item to array/object. */
+/* 公共接口：将节点添加到数组末尾
+ * 参数：
+ *   array - cJSON数组节点
+ *   item - 待添加的新节点
+ * 返回值：true=成功；false=失败
+ */
 CJSON_PUBLIC(cJSON_bool) cJSON_AddItemToArray(cJSON *array, cJSON *item)
 {
     return add_item_to_array(array, item);
 }
 
+/* 编译器兼容：临时关闭GCC/Clang的"const转换"警告
+ * 作用：cast_away_const函数需要将const指针转为非const，避免编译器告警
+ */
 #if defined(__clang__) || (defined(__GNUC__)  && ((__GNUC__ > 4) || ((__GNUC__ == 4) && (__GNUC_MINOR__ > 5))))
     #pragma GCC diagnostic push
 #endif
 #ifdef __GNUC__
 #pragma GCC diagnostic ignored "-Wcast-qual"
 #endif
-/* helper function to cast away const */
+/* 工具函数：移除指针的const属性（仅用于合法场景）
+ * 参数：string - const指针
+ * 返回值：非const指针
+ */
 static void* cast_away_const(const void* string)
 {
     return (void*)string;
@@ -2507,11 +2560,22 @@ static void* cast_away_const(const void* string)
 #endif
 
 
+/* 内部接口：将节点添加到对象（设置键名）
+ * 作用：处理键名的内存管理（拷贝/引用），复用数组添加逻辑
+ * 参数：
+ *   object - cJSON对象节点
+ *   string - 键名
+ *   item - 待添加的节点
+ *   hooks - 内存钩子
+ *   constant_key - 是否使用常量键名（true=不拷贝，false=拷贝）
+ * 返回值：true=成功；false=失败
+ */
 static cJSON_bool add_item_to_object(cJSON * const object, const char * const string, cJSON * const item, const internal_hooks * const hooks, const cJSON_bool constant_key)
 {
     char *new_key = NULL;
     int new_type = cJSON_Invalid;
 
+    /*入参合法性检查：对象/键名/节点空 或 自引用 → 失败*/
     if ((object == NULL) || (string == NULL) || (item == NULL) || (object == item))
     {
         return false;
@@ -2519,11 +2583,13 @@ static cJSON_bool add_item_to_object(cJSON * const object, const char * const st
 
     if (constant_key)
     {
+        /*常量键名：直接引用，不拷贝（节省内存）*/
         new_key = (char*)cast_away_const(string);
         new_type = item->type | cJSON_StringIsConst;
     }
     else
     {
+        /*非常量键名：拷贝键名字符串（避免原字符串释放导致崩溃）*/
         new_key = (char*)cJSON_strdup((const unsigned char*)string, hooks);
         if (new_key == NULL)
         {
@@ -2533,28 +2599,52 @@ static cJSON_bool add_item_to_object(cJSON * const object, const char * const st
         new_type = item->type & ~cJSON_StringIsConst;
     }
 
+    /*释放节点原有键名（避免内存泄漏）*/
     if (!(item->type & cJSON_StringIsConst) && (item->string != NULL))
     {
         hooks->deallocate(item->string);
     }
 
+    /*设置新键名和类型*/
     item->string = new_key;
     item->type = new_type;
 
+    /*复用数组添加逻辑（对象和数组底层都是双向链表）*/
     return add_item_to_array(object, item);
 }
 
+/* 公共接口：将节点添加到对象（拷贝键名）
+ * 参数：
+ *   object - cJSON对象节点
+ *   string - 键名（会拷贝）
+ *   item - 待添加的节点
+ * 返回值：true=成功；false=失败
+ */
 CJSON_PUBLIC(cJSON_bool) cJSON_AddItemToObject(cJSON *object, const char *string, cJSON *item)
 {
     return add_item_to_object(object, string, item, &global_hooks, false);
 }
 
-/* Add an item to an object with constant string as key */
+/* 公共接口：将节点添加到对象（使用常量键名）
+ * 作用：键名不拷贝，直接引用，适用于常量字符串（如字面量）
+ * 参数：
+ *   object - cJSON对象节点
+ *   string - 常量键名（不拷贝）
+ *   item - 待添加的节点
+ * 返回值：true=成功；false=失败
+ */
 CJSON_PUBLIC(cJSON_bool) cJSON_AddItemToObjectCS(cJSON *object, const char *string, cJSON *item)
 {
     return add_item_to_object(object, string, item, &global_hooks, true);
 }
 
+/* 公共接口：添加节点引用到数组（浅拷贝）
+ * 作用：避免深拷贝，仅引用原节点，节省内存
+ * 参数：
+ *   array - cJSON数组节点
+ *   item - 被引用的原节点
+ * 返回值：true=成功；false=失败
+ */
 CJSON_PUBLIC(cJSON_bool) cJSON_AddItemReferenceToArray(cJSON *array, cJSON *item)
 {
     if (array == NULL)
@@ -2565,6 +2655,13 @@ CJSON_PUBLIC(cJSON_bool) cJSON_AddItemReferenceToArray(cJSON *array, cJSON *item
     return add_item_to_array(array, create_reference(item, &global_hooks));
 }
 
+/* 公共接口：添加节点引用到对象（浅拷贝）
+ * 参数：
+ *   object - cJSON对象节点
+ *   string - 键名（会拷贝）
+ *   item - 被引用的原节点
+ * 返回值：true=成功；false=失败
+ */
 CJSON_PUBLIC(cJSON_bool) cJSON_AddItemReferenceToObject(cJSON *object, const char *string, cJSON *item)
 {
     if ((object == NULL) || (string == NULL))
@@ -2575,6 +2672,12 @@ CJSON_PUBLIC(cJSON_bool) cJSON_AddItemReferenceToObject(cJSON *object, const cha
     return add_item_to_object(object, string, create_reference(item, &global_hooks), &global_hooks, false);
 }
 
+/* 快捷接口：向对象添加null节点
+ * 参数：
+ *   object - cJSON对象节点
+ *   name - 键名
+ * 返回值：成功返回新节点；失败返回NULL
+ */
 CJSON_PUBLIC(cJSON*) cJSON_AddNullToObject(cJSON * const object, const char * const name)
 {
     cJSON *null = cJSON_CreateNull();
@@ -2587,6 +2690,9 @@ CJSON_PUBLIC(cJSON*) cJSON_AddNullToObject(cJSON * const object, const char * co
     return NULL;
 }
 
+/* 快捷接口：向对象添加true节点
+ * 参数/返回值：同AddNullToObject
+ */
 CJSON_PUBLIC(cJSON*) cJSON_AddTrueToObject(cJSON * const object, const char * const name)
 {
     cJSON *true_item = cJSON_CreateTrue();
@@ -2599,6 +2705,9 @@ CJSON_PUBLIC(cJSON*) cJSON_AddTrueToObject(cJSON * const object, const char * co
     return NULL;
 }
 
+/* 快捷接口：向对象添加false节点
+ * 参数/返回值：同AddNullToObject
+ */
 CJSON_PUBLIC(cJSON*) cJSON_AddFalseToObject(cJSON * const object, const char * const name)
 {
     cJSON *false_item = cJSON_CreateFalse();
@@ -2611,6 +2720,13 @@ CJSON_PUBLIC(cJSON*) cJSON_AddFalseToObject(cJSON * const object, const char * c
     return NULL;
 }
 
+/* 快捷接口：向对象添加布尔节点
+ * 参数：
+ *   object - cJSON对象节点
+ *   name - 键名
+ *   boolean - 布尔值（1=true，0=false）
+ * 返回值：同AddNullToObject
+ */
 CJSON_PUBLIC(cJSON*) cJSON_AddBoolToObject(cJSON * const object, const char * const name, const cJSON_bool boolean)
 {
     cJSON *bool_item = cJSON_CreateBool(boolean);
@@ -2623,6 +2739,13 @@ CJSON_PUBLIC(cJSON*) cJSON_AddBoolToObject(cJSON * const object, const char * co
     return NULL;
 }
 
+/* 快捷接口：向对象添加数字节点
+ * 参数：
+ *   object - cJSON对象节点
+ *   name - 键名
+ *   number - 数字值（double）
+ * 返回值：同AddNullToObject
+ */
 CJSON_PUBLIC(cJSON*) cJSON_AddNumberToObject(cJSON * const object, const char * const name, const double number)
 {
     cJSON *number_item = cJSON_CreateNumber(number);
@@ -2635,6 +2758,13 @@ CJSON_PUBLIC(cJSON*) cJSON_AddNumberToObject(cJSON * const object, const char * 
     return NULL;
 }
 
+/* 快捷接口：向对象添加字符串节点
+ * 参数：
+ *   object - cJSON对象节点
+ *   name - 键名
+ *   string - 字符串值
+ * 返回值：同AddNullToObject
+ */
 CJSON_PUBLIC(cJSON*) cJSON_AddStringToObject(cJSON * const object, const char * const name, const char * const string)
 {
     cJSON *string_item = cJSON_CreateString(string);
@@ -2647,6 +2777,13 @@ CJSON_PUBLIC(cJSON*) cJSON_AddStringToObject(cJSON * const object, const char * 
     return NULL;
 }
 
+/* 快捷接口：向对象添加原始JSON节点（不转义）
+ * 参数：
+ *   object - cJSON对象节点
+ *   name - 键名
+ *   raw - 原始JSON字符串
+ * 返回值：同AddNullToObject
+ */
 CJSON_PUBLIC(cJSON*) cJSON_AddRawToObject(cJSON * const object, const char * const name, const char * const raw)
 {
     cJSON *raw_item = cJSON_CreateRaw(raw);
@@ -2659,6 +2796,12 @@ CJSON_PUBLIC(cJSON*) cJSON_AddRawToObject(cJSON * const object, const char * con
     return NULL;
 }
 
+/* 快捷接口：向对象添加子对象节点
+ * 参数：
+ *   object - 父对象节点
+ *   name - 键名
+ * 返回值：成功返回子对象节点；失败返回NULL
+ */
 CJSON_PUBLIC(cJSON*) cJSON_AddObjectToObject(cJSON * const object, const char * const name)
 {
     cJSON *object_item = cJSON_CreateObject();
@@ -2671,6 +2814,9 @@ CJSON_PUBLIC(cJSON*) cJSON_AddObjectToObject(cJSON * const object, const char * 
     return NULL;
 }
 
+/* 快捷接口：向对象添加子数组节点
+ * 参数/返回值：同AddObjectToObject
+ */
 CJSON_PUBLIC(cJSON*) cJSON_AddArrayToObject(cJSON * const object, const char * const name)
 {
     cJSON *array = cJSON_CreateArray();
@@ -2683,6 +2829,13 @@ CJSON_PUBLIC(cJSON*) cJSON_AddArrayToObject(cJSON * const object, const char * c
     return NULL;
 }
 
+/* 公共接口：从父节点中分离指定节点（保留节点，仅移除链表关系）
+ * 作用：不删除节点，仅断开链表，可复用该节点
+ * 参数：
+ *   parent - 父节点（数组/对象）
+ *   item - 待分离的节点
+ * 返回值：成功返回分离的节点；失败返回NULL
+ */
 CJSON_PUBLIC(cJSON *) cJSON_DetachItemViaPointer(cJSON *parent, cJSON * const item)
 {
     if ((parent == NULL) || (item == NULL) || (item != parent->child && item->prev == NULL))
@@ -2692,33 +2845,39 @@ CJSON_PUBLIC(cJSON *) cJSON_DetachItemViaPointer(cJSON *parent, cJSON * const it
 
     if (item != parent->child)
     {
-        /* not the first element */
+        /* 非第一个节点：前驱节点的next指向后继节点 */
         item->prev->next = item->next;
     }
     if (item->next != NULL)
     {
-        /* not the last element */
+        /* 非最后一个节点：后继节点的prev指向前驱节点 */
         item->next->prev = item->prev;
     }
 
     if (item == parent->child)
     {
-        /* first element */
+        /* 第一个节点：父节点child指向后继节点 */
         parent->child = item->next;
     }
     else if (item->next == NULL)
     {
-        /* last element */
+        /* 最后一个节点：更新头节点prev指向新尾节点 */
         parent->child->prev = item->prev;
     }
 
-    /* make sure the detached item doesn't point anywhere anymore */
+    /* 重置分离节点的链表指针（避免野指针） */
     item->prev = NULL;
     item->next = NULL;
 
     return item;
 }
 
+/* 公共接口：从数组中分离指定索引的节点
+ * 参数：
+ *   array - cJSON数组节点
+ *   which - 元素索引（从0开始）
+ * 返回值：成功返回分离的节点；失败返回NULL
+ */
 CJSON_PUBLIC(cJSON *) cJSON_DetachItemFromArray(cJSON *array, int which)
 {
     if (which < 0)
@@ -2729,11 +2888,22 @@ CJSON_PUBLIC(cJSON *) cJSON_DetachItemFromArray(cJSON *array, int which)
     return cJSON_DetachItemViaPointer(array, get_array_item(array, (size_t)which));
 }
 
+/* 公共接口：从数组中删除指定索引的节点（分离+释放）
+ * 参数：
+ *   array - cJSON数组节点
+ *   which - 元素索引
+ */
 CJSON_PUBLIC(void) cJSON_DeleteItemFromArray(cJSON *array, int which)
 {
     cJSON_Delete(cJSON_DetachItemFromArray(array, which));
 }
 
+/* 公共接口：从对象中分离指定键名的节点（大小写不敏感）
+ * 参数：
+ *   object - cJSON对象节点
+ *   string - 键名
+ * 返回值：成功返回分离的节点；失败返回NULL
+ */
 CJSON_PUBLIC(cJSON *) cJSON_DetachItemFromObject(cJSON *object, const char *string)
 {
     cJSON *to_detach = cJSON_GetObjectItem(object, string);
@@ -2741,6 +2911,9 @@ CJSON_PUBLIC(cJSON *) cJSON_DetachItemFromObject(cJSON *object, const char *stri
     return cJSON_DetachItemViaPointer(object, to_detach);
 }
 
+/* 公共接口：从对象中分离指定键名的节点（大小写敏感）
+ * 参数/返回值：同DetachItemFromObject
+ */
 CJSON_PUBLIC(cJSON *) cJSON_DetachItemFromObjectCaseSensitive(cJSON *object, const char *string)
 {
     cJSON *to_detach = cJSON_GetObjectItemCaseSensitive(object, string);
@@ -2748,17 +2921,32 @@ CJSON_PUBLIC(cJSON *) cJSON_DetachItemFromObjectCaseSensitive(cJSON *object, con
     return cJSON_DetachItemViaPointer(object, to_detach);
 }
 
+/* 公共接口：从对象中删除指定键名的节点（大小写不敏感）
+ * 参数：
+ *   object - cJSON对象节点
+ *   string - 键名
+ */
 CJSON_PUBLIC(void) cJSON_DeleteItemFromObject(cJSON *object, const char *string)
 {
     cJSON_Delete(cJSON_DetachItemFromObject(object, string));
 }
 
+/* 公共接口：从对象中删除指定键名的节点（大小写敏感）
+ * 参数：同DeleteItemFromObject
+ */
 CJSON_PUBLIC(void) cJSON_DeleteItemFromObjectCaseSensitive(cJSON *object, const char *string)
 {
     cJSON_Delete(cJSON_DetachItemFromObjectCaseSensitive(object, string));
 }
 
-/* Replace array/object items with new ones. */
+/* 公共接口：在数组指定索引位置插入节点
+ * 作用：支持中间插入，而非仅追加
+ * 参数：
+ *   array - cJSON数组节点
+ *   which - 插入位置（0=开头，n=第n个元素后）
+ *   newitem - 待插入的新节点
+ * 返回值：true=成功；false=失败
+ */
 CJSON_PUBLIC(cJSON_bool) cJSON_InsertItemInArray(cJSON *array, int which, cJSON *newitem)
 {
     cJSON *after_inserted = NULL;
@@ -2768,31 +2956,42 @@ CJSON_PUBLIC(cJSON_bool) cJSON_InsertItemInArray(cJSON *array, int which, cJSON 
         return false;
     }
 
+    /*找到插入位置的后一个节点*/
     after_inserted = get_array_item(array, (size_t)which);
     if (after_inserted == NULL)
     {
-        return add_item_to_array(array, newitem);
+        return add_item_to_array(array, newitem);/*插入位置超出数组长度 → 追加到末尾*/
     }
 
+    /*合法性检查：节点链表损坏 → 失败*/
     if (after_inserted != array->child && after_inserted->prev == NULL) {
         /* return false if after_inserted is a corrupted array item */
         return false;
     }
 
+    /*调整链表指针：插入新节点到after_inserted之前*/
     newitem->next = after_inserted;
     newitem->prev = after_inserted->prev;
     after_inserted->prev = newitem;
     if (after_inserted == array->child)
     {
-        array->child = newitem;
+        array->child = newitem;/*插入到开头：更新数组child指向新节点*/
     }
     else
     {
-        newitem->prev->next = newitem;
+        newitem->prev->next = newitem;/*插入到中间：前驱节点的next指向新节点*/
     }
     return true;
 }
 
+/* 公共接口：替换父节点中的指定节点
+ * 作用：替换节点内容，维护链表关系
+ * 参数：
+ *   parent - 父节点（数组/对象）
+ *   item - 被替换的旧节点
+ *   replacement - 新节点
+ * 返回值：true=成功；false=失败
+ */
 CJSON_PUBLIC(cJSON_bool) cJSON_ReplaceItemViaPointer(cJSON * const parent, cJSON * const item, cJSON * replacement)
 {
     if ((parent == NULL) || (parent->child == NULL) || (replacement == NULL) || (item == NULL))
@@ -2802,16 +3001,19 @@ CJSON_PUBLIC(cJSON_bool) cJSON_ReplaceItemViaPointer(cJSON * const parent, cJSON
 
     if (replacement == item)
     {
-        return true;
+        return true;/*新旧节点相同，无需替换*/
     }
 
+    /*继承旧节点的链表关系*/
     replacement->next = item->next;
     replacement->prev = item->prev;
 
+    /*更新后继节点的prev*/
     if (replacement->next != NULL)
     {
         replacement->next->prev = replacement;
     }
+    /*替换第一个节点：更新父节点child*/
     if (parent->child == item)
     {
         if (parent->child->prev == parent->child)
@@ -2827,14 +3029,15 @@ CJSON_PUBLIC(cJSON_bool) cJSON_ReplaceItemViaPointer(cJSON * const parent, cJSON
          */
         if (replacement->prev != NULL)
         {
-            replacement->prev->next = replacement;
+            replacement->prev->next = replacement;/*更新前驱节点的next*/
         }
         if (replacement->next == NULL)
         {
-            parent->child->prev = replacement;
+            parent->child->prev = replacement;/*更新尾节点标记*/
         }
     }
 
+    /*重置旧节点指针并释放*/
     item->next = NULL;
     item->prev = NULL;
     cJSON_Delete(item);
@@ -2842,6 +3045,13 @@ CJSON_PUBLIC(cJSON_bool) cJSON_ReplaceItemViaPointer(cJSON * const parent, cJSON
     return true;
 }
 
+/* 公共接口：替换数组中指定索引的节点
+ * 参数：
+ *   array - cJSON数组节点
+ *   which - 元素索引
+ *   newitem - 新节点
+ * 返回值：true=成功；false=失败
+ */
 CJSON_PUBLIC(cJSON_bool) cJSON_ReplaceItemInArray(cJSON *array, int which, cJSON *newitem)
 {
     if (which < 0)
@@ -2852,6 +3062,14 @@ CJSON_PUBLIC(cJSON_bool) cJSON_ReplaceItemInArray(cJSON *array, int which, cJSON
     return cJSON_ReplaceItemViaPointer(array, get_array_item(array, (size_t)which), newitem);
 }
 
+/* 内部接口：替换对象中指定键名的节点
+ * 参数：
+ *   object - cJSON对象节点
+ *   string - 键名
+ *   replacement - 新节点
+ *   case_sensitive - 是否大小写敏感
+ * 返回值：true=成功；false=失败
+ */
 static cJSON_bool replace_item_in_object(cJSON *object, const char *string, cJSON *replacement, cJSON_bool case_sensitive)
 {
     if ((replacement == NULL) || (string == NULL))
@@ -2859,19 +3077,21 @@ static cJSON_bool replace_item_in_object(cJSON *object, const char *string, cJSO
         return false;
     }
 
-    /* replace the name in the replacement */
+    /* 设置新节点的键名（替换原有键名） */
     if (!(replacement->type & cJSON_StringIsConst) && (replacement->string != NULL))
     {
         cJSON_free(replacement->string);
     }
+    /*拷贝新键名*/
     replacement->string = (char*)cJSON_strdup((const unsigned char*)string, &global_hooks);
     if (replacement->string == NULL)
     {
         return false;
     }
 
-    replacement->type &= ~cJSON_StringIsConst;
+    replacement->type &= ~cJSON_StringIsConst;/*清除常量标记*/
 
+    /*找到旧节点并替换*/
     return cJSON_ReplaceItemViaPointer(object, get_object_item(object, string, case_sensitive), replacement);
 }
 
