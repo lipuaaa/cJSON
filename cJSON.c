@@ -3095,17 +3095,31 @@ static cJSON_bool replace_item_in_object(cJSON *object, const char *string, cJSO
     return cJSON_ReplaceItemViaPointer(object, get_object_item(object, string, case_sensitive), replacement);
 }
 
+/* 公共接口：替换对象中指定键名的节点（大小写不敏感）
+ * 参数：
+ *   object - cJSON对象节点
+ *   string - 键名
+ *   newitem - 新节点
+ * 返回值：true=成功；false=失败
+ */
 CJSON_PUBLIC(cJSON_bool) cJSON_ReplaceItemInObject(cJSON *object, const char *string, cJSON *newitem)
 {
     return replace_item_in_object(object, string, newitem, false);
 }
 
+/* 公共接口：替换对象中指定键名的节点（大小写敏感）
+ * 参数/返回值：同ReplaceItemInObject
+ */
 CJSON_PUBLIC(cJSON_bool) cJSON_ReplaceItemInObjectCaseSensitive(cJSON *object, const char *string, cJSON *newitem)
 {
     return replace_item_in_object(object, string, newitem, true);
 }
 
-/* Create basic types: */
+/* ===================== 基础类型节点创建接口 ===================== */
+
+/* 公共接口：创建null类型节点
+ * 返回值：成功返回null节点；失败返回NULL
+ */
 CJSON_PUBLIC(cJSON *) cJSON_CreateNull(void)
 {
     cJSON *item = cJSON_New_Item(&global_hooks);
@@ -3117,6 +3131,9 @@ CJSON_PUBLIC(cJSON *) cJSON_CreateNull(void)
     return item;
 }
 
+/* 公共接口：创建true类型节点
+ * 返回值：成功返回true节点；失败返回NULL
+ */
 CJSON_PUBLIC(cJSON *) cJSON_CreateTrue(void)
 {
     cJSON *item = cJSON_New_Item(&global_hooks);
@@ -3128,6 +3145,9 @@ CJSON_PUBLIC(cJSON *) cJSON_CreateTrue(void)
     return item;
 }
 
+/* 公共接口：创建false类型节点
+ * 返回值：成功返回false节点；失败返回NULL
+ */
 CJSON_PUBLIC(cJSON *) cJSON_CreateFalse(void)
 {
     cJSON *item = cJSON_New_Item(&global_hooks);
@@ -3139,6 +3159,10 @@ CJSON_PUBLIC(cJSON *) cJSON_CreateFalse(void)
     return item;
 }
 
+/* 公共接口：创建布尔类型节点（通用）
+ * 参数：boolean - 布尔值（1=true，0=false）
+ * 返回值：成功返回布尔节点；失败返回NULL
+ */
 CJSON_PUBLIC(cJSON *) cJSON_CreateBool(cJSON_bool boolean)
 {
     cJSON *item = cJSON_New_Item(&global_hooks);
@@ -3150,6 +3174,11 @@ CJSON_PUBLIC(cJSON *) cJSON_CreateBool(cJSON_bool boolean)
     return item;
 }
 
+/* 公共接口：创建数字类型节点
+ * 参数：num - 数字值（double）
+ * 返回值：成功返回数字节点；失败返回NULL
+ * 关键设计：同步设置valuedouble（精确值）和valueint（整数近似值，兼容旧逻辑）
+ */
 CJSON_PUBLIC(cJSON *) cJSON_CreateNumber(double num)
 {
     cJSON *item = cJSON_New_Item(&global_hooks);
@@ -3176,6 +3205,10 @@ CJSON_PUBLIC(cJSON *) cJSON_CreateNumber(double num)
     return item;
 }
 
+/* 公共接口：创建字符串类型节点（拷贝字符串）
+ * 参数：string - 字符串值（会拷贝，原字符串释放不影响）
+ * 返回值：成功返回字符串节点；失败返回NULL
+ */
 CJSON_PUBLIC(cJSON *) cJSON_CreateString(const char *string)
 {
     cJSON *item = cJSON_New_Item(&global_hooks);
@@ -3193,6 +3226,11 @@ CJSON_PUBLIC(cJSON *) cJSON_CreateString(const char *string)
     return item;
 }
 
+/* 公共接口：创建字符串类型节点（引用字符串，浅拷贝）
+ * 作用：不拷贝字符串，直接引用，节省内存（适用于常量字符串）
+ * 参数：string - 常量字符串（如字面量，生命周期长）
+ * 返回值：成功返回字符串节点；失败返回NULL
+ */
 CJSON_PUBLIC(cJSON *) cJSON_CreateStringReference(const char *string)
 {
     cJSON *item = cJSON_New_Item(&global_hooks);
@@ -3205,6 +3243,10 @@ CJSON_PUBLIC(cJSON *) cJSON_CreateStringReference(const char *string)
     return item;
 }
 
+/* 公共接口：创建对象类型节点（引用子节点，浅拷贝）
+ * 参数：child - 被引用的子节点链表
+ * 返回值：成功返回对象节点；失败返回NULL
+ */
 CJSON_PUBLIC(cJSON *) cJSON_CreateObjectReference(const cJSON *child)
 {
     cJSON *item = cJSON_New_Item(&global_hooks);
@@ -3216,6 +3258,10 @@ CJSON_PUBLIC(cJSON *) cJSON_CreateObjectReference(const cJSON *child)
     return item;
 }
 
+/* 公共接口：创建数组类型节点（引用子节点，浅拷贝）
+ * 参数：child - 被引用的子节点链表
+ * 返回值：成功返回数组节点；失败返回NULL
+ */
 CJSON_PUBLIC(cJSON *) cJSON_CreateArrayReference(const cJSON *child) {
     cJSON *item = cJSON_New_Item(&global_hooks);
     if (item != NULL) {
@@ -3226,6 +3272,11 @@ CJSON_PUBLIC(cJSON *) cJSON_CreateArrayReference(const cJSON *child) {
     return item;
 }
 
+/* 公共接口：创建原始JSON类型节点（不转义，直接拷贝）
+ * 作用：存储无需转义的原始JSON片段（如"{\"key\":123}"）
+ * 参数：raw - 原始JSON字符串
+ * 返回值：成功返回原始节点；失败返回NULL
+ */
 CJSON_PUBLIC(cJSON *) cJSON_CreateRaw(const char *raw)
 {
     cJSON *item = cJSON_New_Item(&global_hooks);
@@ -3243,6 +3294,9 @@ CJSON_PUBLIC(cJSON *) cJSON_CreateRaw(const char *raw)
     return item;
 }
 
+/* 公共接口：创建空数组节点
+ * 返回值：成功返回数组节点；失败返回NULL
+ */
 CJSON_PUBLIC(cJSON *) cJSON_CreateArray(void)
 {
     cJSON *item = cJSON_New_Item(&global_hooks);
@@ -3254,6 +3308,9 @@ CJSON_PUBLIC(cJSON *) cJSON_CreateArray(void)
     return item;
 }
 
+/* 公共接口：创建空对象节点
+ * 返回值：成功返回对象节点；失败返回NULL
+ */
 CJSON_PUBLIC(cJSON *) cJSON_CreateObject(void)
 {
     cJSON *item = cJSON_New_Item(&global_hooks);
@@ -3265,7 +3322,14 @@ CJSON_PUBLIC(cJSON *) cJSON_CreateObject(void)
     return item;
 }
 
-/* Create Arrays: */
+/* ===================== 批量数组创建接口 ===================== */
+
+/* 公共接口：批量创建int数组节点
+ * 参数：
+ *   numbers - int数组（源数据）
+ *   count - 数组长度
+ * 返回值：成功返回包含所有int的数组节点；失败返回NULL
+ */
 CJSON_PUBLIC(cJSON *) cJSON_CreateIntArray(const int *numbers, int count)
 {
     size_t i = 0;
@@ -3306,6 +3370,12 @@ CJSON_PUBLIC(cJSON *) cJSON_CreateIntArray(const int *numbers, int count)
     return a;
 }
 
+/* 公共接口：批量创建float数组节点
+ * 参数：
+ *   numbers - float数组（源数据）
+ *   count - 数组长度
+ * 返回值：成功返回包含所有float的数组节点；失败返回NULL
+ */
 CJSON_PUBLIC(cJSON *) cJSON_CreateFloatArray(const float *numbers, int count)
 {
     size_t i = 0;
@@ -3346,6 +3416,12 @@ CJSON_PUBLIC(cJSON *) cJSON_CreateFloatArray(const float *numbers, int count)
     return a;
 }
 
+/* 公共接口：批量创建double数组节点
+ * 参数：
+ *   numbers - double数组（源数据）
+ *   count - 数组长度
+ * 返回值：成功返回包含所有double的数组节点；失败返回NULL
+ */
 CJSON_PUBLIC(cJSON *) cJSON_CreateDoubleArray(const double *numbers, int count)
 {
     size_t i = 0;
@@ -3386,6 +3462,12 @@ CJSON_PUBLIC(cJSON *) cJSON_CreateDoubleArray(const double *numbers, int count)
     return a;
 }
 
+/* 公共接口：批量创建字符串数组节点
+ * 参数：
+ *   strings - 字符串数组（源数据）
+ *   count - 数组长度
+ * 返回值：成功返回包含所有字符串的数组节点；失败返回NULL
+ */
 CJSON_PUBLIC(cJSON *) cJSON_CreateStringArray(const char *const *strings, int count)
 {
     size_t i = 0;
@@ -3426,44 +3508,62 @@ CJSON_PUBLIC(cJSON *) cJSON_CreateStringArray(const char *const *strings, int co
     return a;
 }
 
-/* Duplication */
+/* ===================== 节点深拷贝接口 ===================== */
+
+/*前向声明：递归深拷贝函数*/
 cJSON * cJSON_Duplicate_rec(const cJSON *item, size_t depth, cJSON_bool recurse);
 
+/* 公共接口：深拷贝cJSON节点（对外封装）
+ * 参数：
+ *   item - 被拷贝的源节点
+ *   recurse - 是否递归拷贝子节点（true=深拷贝，false=浅拷贝）
+ * 返回值：成功返回拷贝后的新节点；失败返回NULL
+ */
 CJSON_PUBLIC(cJSON *) cJSON_Duplicate(const cJSON *item, cJSON_bool recurse)
 {
+    /*调用递归拷贝函数，初始深度=0*/
     return cJSON_Duplicate_rec(item, 0, recurse );
 }
 
+/* 内部接口：递归深拷贝cJSON节点（核心实现）
+ * 参数：
+ *   item - 源节点
+ *   depth - 当前递归深度（防止循环引用）
+ *   recurse - 是否递归
+ * 返回值：成功返回新节点；失败返回NULL
+ */
 cJSON * cJSON_Duplicate_rec(const cJSON *item, size_t depth, cJSON_bool recurse)
 {
-    cJSON *newitem = NULL;
-    cJSON *child = NULL;
-    cJSON *next = NULL;
-    cJSON *newchild = NULL;
+    cJSON *newitem = NULL;/*拷贝后的新节点*/
+    cJSON *child = NULL;/*源节点的子节点*/
+    cJSON *next = NULL;/*新节点的子节点链表指针*/
+    cJSON *newchild = NULL;/*拷贝后的子节点*/
 
-    /* Bail on bad ptr */
+    /* 入参合法性检查：源节点空 → 失败 */
     if (!item)
     {
         goto fail;
     }
-    /* Create new item */
+    /* 创建新节点（分配内存） */
     newitem = cJSON_New_Item(&global_hooks);
     if (!newitem)
     {
         goto fail;
     }
-    /* Copy over all vars */
-    newitem->type = item->type & (~cJSON_IsReference);
-    newitem->valueint = item->valueint;
-    newitem->valuedouble = item->valuedouble;
+    /* 第一步：拷贝基础字段 */
+    newitem->type = item->type & (~cJSON_IsReference);/*清除引用标记*/
+    newitem->valueint = item->valueint;/*拷贝int值*/
+    newitem->valuedouble = item->valuedouble;/*拷贝double值*/
     if (item->valuestring)
     {
         newitem->valuestring = (char*)cJSON_strdup((unsigned char*)item->valuestring, &global_hooks);
+        /*拷贝失败 → 跳转失败逻辑*/
         if (!newitem->valuestring)
         {
             goto fail;
         }
     }
+    /*拷贝string（对象键名）：常量键名直接引用，否则拷贝*/
     if (item->string)
     {
         newitem->string = (item->type&cJSON_StringIsConst) ? item->string : (char*)cJSON_strdup((unsigned char*)item->string, &global_hooks);
@@ -3472,38 +3572,40 @@ cJSON * cJSON_Duplicate_rec(const cJSON *item, size_t depth, cJSON_bool recurse)
             goto fail;
         }
     }
-    /* If non-recursive, then we're done! */
+    /* 第二步：非递归模式 → 直接返回（浅拷贝） */
     if (!recurse)
     {
         return newitem;
     }
-    /* Walk the ->next chain for the child. */
+    /* 第三步：递归拷贝子节点（数组/对象） */
     child = item->child;
     while (child != NULL)
     {
+        /*循环引用保护：超过深度限制 → 失败*/
         if(depth >= CJSON_CIRCULAR_LIMIT) {
             goto fail;
         }
-        newchild = cJSON_Duplicate_rec(child, depth + 1, true); /* Duplicate (with recurse) each item in the ->next chain */
+        newchild = cJSON_Duplicate_rec(child, depth + 1, true); /* 递归拷贝子节点（深度+1） */
         if (!newchild)
         {
             goto fail;
         }
         if (next != NULL)
         {
-            /* If newitem->child already set, then crosswire ->prev and ->next and move on */
+            /*  非第一个子节点：追加到链表末尾 */
             next->next = newchild;
             newchild->prev = next;
             next = newchild;
         }
         else
         {
-            /* Set newitem->child and move to it */
+            /* 第一个子节点：新节点child指向该子节点 */
             newitem->child = newchild;
             next = newchild;
         }
         child = child->next;
     }
+    /*闭环链表：头节点prev指向尾节点*/
     if (newitem && newitem->child)
     {
         newitem->child->prev = newchild;
@@ -3520,6 +3622,10 @@ fail:
     return NULL;
 }
 
+/* 工具函数：跳过单行注释（// 开头）
+ * 作用：解析JSON时忽略单行注释，提升兼容性
+ * 参数：input - 指向JSON字符串的指针（会修改指针位置）
+ */
 static void skip_oneline_comment(char **input)
 {
     *input += static_strlen("//");
@@ -3533,6 +3639,10 @@ static void skip_oneline_comment(char **input)
     }
 }
 
+/* 工具函数：跳过多行注释（/* ... * / 包裹）
+ * 作用：解析JSON时忽略多行注释，提升兼容性
+ * 参数：input - 指向JSON字符串的指针（会修改指针位置）
+ */
 static void skip_multiline_comment(char **input)
 {
     *input += static_strlen("/*");
