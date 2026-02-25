@@ -3657,12 +3657,19 @@ static void skip_multiline_comment(char **input)
     }
 }
 
+/* 工具函数：压缩JSON字符串（保留字符串内容，去除无关空白）
+ * 作用：minify时处理字符串，避免误删字符串内的空白/引号
+ * 参数：
+ *   input - 指向源JSON字符串的指针（当前指向字符串开头的"\"）
+ *   output - 指向压缩后字符串的指针
+ */
 static void minify_string(char **input, char **output) {
+    /*保留字符串开头的"\"*/
     (*output)[0] = (*input)[0];
     *input += static_strlen("\"");
     *output += static_strlen("\"");
 
-
+    /*遍历字符串内容，直到结束符"\"*/
     for (; (*input)[0] != '\0'; (void)++(*input), ++(*output)) {
         (*output)[0] = (*input)[0];
 
@@ -3672,6 +3679,7 @@ static void minify_string(char **input, char **output) {
             *output += static_strlen("\"");
             return;
         } else if (((*input)[0] == '\\') && ((*input)[1] == '\"')) {
+            /*处理转义引号（\"）：保留转义字符*/
             (*output)[1] = (*input)[1];
             *input += static_strlen("\"");
             *output += static_strlen("\"");
@@ -3679,9 +3687,13 @@ static void minify_string(char **input, char **output) {
     }
 }
 
+/* 公共接口：压缩JSON字符串（去除空白、注释，保留语义）
+ * 作用：减小JSON体积，去除无关字符（空格/制表符/换行/注释）
+ * 参数：json - 源JSON字符串（会直接修改原字符串）
+ */
 CJSON_PUBLIC(void) cJSON_Minify(char *json)
 {
-    char *into = json;
+    char *into = json;/*压缩后字符串的写入指针（原地修改）*/
 
     if (json == NULL)
     {
@@ -3692,6 +3704,7 @@ CJSON_PUBLIC(void) cJSON_Minify(char *json)
     {
         switch (json[0])
         {
+            /*情况1：空白字符（空格/制表符/回车/换行）→ 跳过，不写入*/
             case ' ':
             case '\t':
             case '\r':
@@ -3699,6 +3712,7 @@ CJSON_PUBLIC(void) cJSON_Minify(char *json)
                 json++;
                 break;
 
+            /*情况2：注释开头 → 跳过注释内容*/
             case '/':
                 if (json[1] == '/')
                 {
@@ -3712,10 +3726,12 @@ CJSON_PUBLIC(void) cJSON_Minify(char *json)
                 }
                 break;
 
+            /*情况3：字符串开头 → 处理字符串（保留内容，避免误压缩）*/
             case '\"':
                 minify_string(&json, (char**)&into);
                 break;
 
+            /*情况4：普通字符 → 保留并写入*/
             default:
                 into[0] = json[0];
                 json++;
@@ -3723,10 +3739,16 @@ CJSON_PUBLIC(void) cJSON_Minify(char *json)
         }
     }
 
-    /* and null-terminate. */
+    /* 压缩完成：添加字符串终止符 */
     *into = '\0';
 }
 
+/* ===================== 节点类型判断接口 ===================== */
+
+/* 公共接口：判断节点是否为无效类型
+ * 参数：item - cJSON节点
+ * 返回值：true=无效；false=有效/节点空
+ */
 CJSON_PUBLIC(cJSON_bool) cJSON_IsInvalid(const cJSON * const item)
 {
     if (item == NULL)
@@ -3734,9 +3756,14 @@ CJSON_PUBLIC(cJSON_bool) cJSON_IsInvalid(const cJSON * const item)
         return false;
     }
 
+    /*按位与0xFF：仅保留基础类型（屏蔽扩展标记如cJSON_IsReference）*/
     return (item->type & 0xFF) == cJSON_Invalid;
 }
 
+/* 公共接口：判断节点是否为false类型
+ * 参数：item - cJSON节点
+ * 返回值：true=是false；false=否/节点空
+ */
 CJSON_PUBLIC(cJSON_bool) cJSON_IsFalse(const cJSON * const item)
 {
     if (item == NULL)
@@ -3747,6 +3774,10 @@ CJSON_PUBLIC(cJSON_bool) cJSON_IsFalse(const cJSON * const item)
     return (item->type & 0xFF) == cJSON_False;
 }
 
+/* 公共接口：判断节点是否为true类型
+ * 参数：item - cJSON节点
+ * 返回值：true=是true；false=否/节点空
+ */
 CJSON_PUBLIC(cJSON_bool) cJSON_IsTrue(const cJSON * const item)
 {
     if (item == NULL)
@@ -3758,6 +3789,10 @@ CJSON_PUBLIC(cJSON_bool) cJSON_IsTrue(const cJSON * const item)
 }
 
 
+/* 公共接口：判断节点是否为布尔类型（true/false）
+ * 参数：item - cJSON节点
+ * 返回值：true=是布尔；false=否/节点空
+ */
 CJSON_PUBLIC(cJSON_bool) cJSON_IsBool(const cJSON * const item)
 {
     if (item == NULL)
@@ -3767,6 +3802,10 @@ CJSON_PUBLIC(cJSON_bool) cJSON_IsBool(const cJSON * const item)
 
     return (item->type & (cJSON_True | cJSON_False)) != 0;
 }
+/* 公共接口：判断节点是否为null类型
+ * 参数：item - cJSON节点
+ * 返回值：true=是null；false=否/节点空
+ */
 CJSON_PUBLIC(cJSON_bool) cJSON_IsNull(const cJSON * const item)
 {
     if (item == NULL)
@@ -3777,6 +3816,10 @@ CJSON_PUBLIC(cJSON_bool) cJSON_IsNull(const cJSON * const item)
     return (item->type & 0xFF) == cJSON_NULL;
 }
 
+/* 公共接口：判断节点是否为数字类型
+ * 参数：item - cJSON节点
+ * 返回值：true=是数字；false=否/节点空
+ */
 CJSON_PUBLIC(cJSON_bool) cJSON_IsNumber(const cJSON * const item)
 {
     if (item == NULL)
@@ -3787,6 +3830,10 @@ CJSON_PUBLIC(cJSON_bool) cJSON_IsNumber(const cJSON * const item)
     return (item->type & 0xFF) == cJSON_Number;
 }
 
+/* 公共接口：判断节点是否为字符串类型
+ * 参数：item - cJSON节点
+ * 返回值：true=是字符串；false=否/节点空
+ */
 CJSON_PUBLIC(cJSON_bool) cJSON_IsString(const cJSON * const item)
 {
     if (item == NULL)
@@ -3797,6 +3844,10 @@ CJSON_PUBLIC(cJSON_bool) cJSON_IsString(const cJSON * const item)
     return (item->type & 0xFF) == cJSON_String;
 }
 
+/* 公共接口：判断节点是否为数组类型
+ * 参数：item - cJSON节点
+ * 返回值：true=是数组；false=否/节点空
+ */
 CJSON_PUBLIC(cJSON_bool) cJSON_IsArray(const cJSON * const item)
 {
     if (item == NULL)
@@ -3807,6 +3858,10 @@ CJSON_PUBLIC(cJSON_bool) cJSON_IsArray(const cJSON * const item)
     return (item->type & 0xFF) == cJSON_Array;
 }
 
+/* 公共接口：判断节点是否为对象类型
+ * 参数：item - cJSON节点
+ * 返回值：true=是对象；false=否/节点空
+ */
 CJSON_PUBLIC(cJSON_bool) cJSON_IsObject(const cJSON * const item)
 {
     if (item == NULL)
@@ -3817,6 +3872,10 @@ CJSON_PUBLIC(cJSON_bool) cJSON_IsObject(const cJSON * const item)
     return (item->type & 0xFF) == cJSON_Object;
 }
 
+/* 公共接口：判断节点是否为原始JSON类型
+ * 参数：item - cJSON节点
+ * 返回值：true=是原始JSON；false=否/节点空
+ */
 CJSON_PUBLIC(cJSON_bool) cJSON_IsRaw(const cJSON * const item)
 {
     if (item == NULL)
@@ -3827,14 +3886,23 @@ CJSON_PUBLIC(cJSON_bool) cJSON_IsRaw(const cJSON * const item)
     return (item->type & 0xFF) == cJSON_Raw;
 }
 
+/* 公共接口：比较两个cJSON节点是否完全相等
+ * 作用：递归比较节点类型、值、子节点，支持大小写敏感/不敏感（仅对象键名）
+ * 参数：
+ *   a - 第一个节点
+ *   b - 第二个节点
+ *   case_sensitive - 对象键名是否大小写敏感
+ * 返回值：true=相等；false=不相等/节点空
+ */
 CJSON_PUBLIC(cJSON_bool) cJSON_Compare(const cJSON * const a, const cJSON * const b, const cJSON_bool case_sensitive)
 {
+    /*快速判断：节点空 或 基础类型不同 → 不相等*/
     if ((a == NULL) || (b == NULL) || ((a->type & 0xFF) != (b->type & 0xFF)))
     {
         return false;
     }
 
-    /* check if type is valid */
+    /* 类型合法性检查：仅支持标准JSON类型 */
     switch (a->type & 0xFF)
     {
         case cJSON_False:
@@ -3851,20 +3919,22 @@ CJSON_PUBLIC(cJSON_bool) cJSON_Compare(const cJSON * const a, const cJSON * cons
             return false;
     }
 
-    /* identical objects are equal */
+    /* 同一节点直接相等（自引用） */
     if (a == b)
     {
         return true;
     }
 
+    /* 按类型递归比较 */
     switch (a->type & 0xFF)
     {
-        /* in these cases and equal type is enough */
+        /* 无值类型：类型相同即相等 */
         case cJSON_False:
         case cJSON_True:
         case cJSON_NULL:
             return true;
 
+        /*数字类型：比较valuedouble（高精度）*/
         case cJSON_Number:
             if (compare_double(a->valuedouble, b->valuedouble))
             {
@@ -3872,6 +3942,7 @@ CJSON_PUBLIC(cJSON_bool) cJSON_Compare(const cJSON * const a, const cJSON * cons
             }
             return false;
 
+        /*字符串/原始JSON：比较valuestring内容*/
         case cJSON_String:
         case cJSON_Raw:
             if ((a->valuestring == NULL) || (b->valuestring == NULL))
@@ -3885,23 +3956,25 @@ CJSON_PUBLIC(cJSON_bool) cJSON_Compare(const cJSON * const a, const cJSON * cons
 
             return false;
 
+        /*数组类型：逐元素递归比较（顺序、内容均需一致）*/
         case cJSON_Array:
         {
             cJSON *a_element = a->child;
             cJSON *b_element = b->child;
 
+            /*遍历所有元素*/
             for (; (a_element != NULL) && (b_element != NULL);)
             {
                 if (!cJSON_Compare(a_element, b_element, case_sensitive))
                 {
-                    return false;
+                    return false;/*任一元素不相等 → 整体不相等*/
                 }
 
                 a_element = a_element->next;
                 b_element = b_element->next;
             }
 
-            /* one of the arrays is longer than the other */
+            /* 数组长度不同 → 不相等（a_element和b_element需同时为NULL） */
             if (a_element != b_element) {
                 return false;
             }
@@ -3909,31 +3982,33 @@ CJSON_PUBLIC(cJSON_bool) cJSON_Compare(const cJSON * const a, const cJSON * cons
             return true;
         }
 
+        /*对象类型：逐键值对比较（键名、值均需一致，无顺序要求）*/
         case cJSON_Object:
         {
             cJSON *a_element = NULL;
             cJSON *b_element = NULL;
+            /*第一步：遍历a的所有键值对，检查b中是否存在且相等*/
             cJSON_ArrayForEach(a_element, a)
             {
-                /* TODO This has O(n^2) runtime, which is horrible! */
+                /* 注意：此处时间复杂度O(n²)，性能较差（TODO优化） */
                 b_element = get_object_item(b, a_element->string, case_sensitive);
                 if (b_element == NULL)
                 {
                     return false;
                 }
 
-                if (!cJSON_Compare(a_element, b_element, case_sensitive))
+                if (!cJSON_Compare(a_element, b_element, case_sensitive))/*值不相等 → 不相等*/
                 {
                     return false;
                 }
             }
 
-            /* doing this twice, once on a and b to prevent true comparison if a subset of b
+            /* 第二步：遍历b的所有键值对，检查a中是否存在且相等（避免a是b的子集）
              * TODO: Do this the proper way, this is just a fix for now */
             cJSON_ArrayForEach(b_element, b)
             {
                 a_element = get_object_item(a, b_element->string, case_sensitive);
-                if (a_element == NULL)
+                if (a_element == NULL)/*a中无该键 → 不相等*/
                 {
                     return false;
                 }
@@ -3952,13 +4027,24 @@ CJSON_PUBLIC(cJSON_bool) cJSON_Compare(const cJSON * const a, const cJSON * cons
     }
 }
 
+/* ===================== 内存管理接口 ===================== */
+
+/* 公共接口：cJSON内存分配（封装全局钩子）
+ * 作用：统一内存分配入口，支持自定义内存分配器
+ * 参数：size - 分配的内存大小
+ * 返回值：成功返回内存指针；失败返回NULL
+ */
 CJSON_PUBLIC(void *) cJSON_malloc(size_t size)
 {
     return global_hooks.allocate(size);
 }
 
+/* 公共接口：cJSON内存释放（封装全局钩子）
+ * 作用：统一内存释放入口，避免内存泄漏
+ * 参数：object - 待释放的内存指针
+ */
 CJSON_PUBLIC(void) cJSON_free(void *object)
 {
-    global_hooks.deallocate(object);
-    object = NULL;
+    global_hooks.deallocate(object);/*用全局释放钩子*/
+    object = NULL;/*置空指针，避免野指针*/
 }
