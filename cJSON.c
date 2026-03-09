@@ -4048,3 +4048,105 @@ CJSON_PUBLIC(void) cJSON_free(void *object)
     global_hooks.deallocate(object);/*用全局释放钩子*/
     object = NULL;/*置空指针，避免野指针*/
 }
+
+/* ==================================================================== */
+/* 寒假作业功能扩展：自定义空格缩进的美化打印函数 */
+/* ==================================================================== */
+CJSON_PUBLIC(char *) cJSON_PrintPretty(const cJSON *item, int spaces)
+{
+    char *unformatted;
+    char *formatted;
+    char *ptr;
+    char *src;
+    char *dest;
+    int indent_level = 0;
+    int extra_length = 0;
+    int in_string = 0;
+    int orig_len = 0;
+    int i = 0;
+
+    /* 1. 先获取一行无格式的原始 JSON 字符串 */
+    unformatted = cJSON_PrintUnformatted(item);
+    if (unformatted == NULL) {
+        return NULL;
+    }
+
+    /* 2. 第一遍扫描：计算美化后一共需要额外增加多少个字符(换行和空格) */
+    ptr = unformatted;
+    while (*ptr != '\0') {
+        /* 判断当前字符是否在引号内部（防止把字符串内容里的逗号也换行了） */
+        if (*ptr == '"' && (ptr == unformatted || *(ptr-1) != '\\')) {
+            in_string = !in_string;
+        }
+        
+        if (!in_string) {
+            if (*ptr == '{' || *ptr == '[') {
+                indent_level++;
+                extra_length += 1 + indent_level * spaces; /* 1个换行符 + N个空格 */
+            } else if (*ptr == '}' || *ptr == ']') {
+                indent_level--;
+                extra_length += 1 + indent_level * spaces;
+            } else if (*ptr == ',') {
+                extra_length += 1 + indent_level * spaces;
+            } else if (*ptr == ':') {
+                extra_length += 1; /* 冒号后面加1个空格，比如 "a": 1 */
+            }
+        }
+        ptr++;
+    }
+
+    /* 3. 分配新内存 (注意 +1 是为了存放字符串结尾的 '\0') */
+    orig_len = strlen(unformatted);
+    formatted = (char *)malloc(orig_len + extra_length + 1);
+    if (formatted == NULL) {
+        cJSON_free(unformatted);
+        return NULL;
+    }
+
+    /* 4. 第二遍扫描：正式组装美化后的字符串 */
+    src = unformatted;
+    dest = formatted;
+    indent_level = 0;
+    in_string = 0;
+
+    while (*src != '\0') {
+        if (*src == '"' && (src == unformatted || *(src-1) != '\\')) {
+            in_string = !in_string;
+        }
+
+        if (!in_string) {
+            if (*src == '{' || *src == '[') {
+                *dest++ = *src++;
+                /* 处理空对象 {} 或空数组 []，中间不加换行 */
+                if (*src != '}' && *src != ']') {
+                    *dest++ = '\n';
+                    indent_level++;
+                    for (i = 0; i < indent_level * spaces; i++) *dest++ = ' ';
+                }
+            } else if (*src == '}' || *src == ']') {
+                if (*(src-1) != '{' && *(src-1) != '[') {
+                    *dest++ = '\n';
+                    indent_level--;
+                    for (i = 0; i < indent_level * spaces; i++) *dest++ = ' ';
+                }
+                *dest++ = *src++;
+            } else if (*src == ',') {
+                *dest++ = *src++;
+                *dest++ = '\n';
+                for (i = 0; i < indent_level * spaces; i++) *dest++ = ' ';
+            } else if (*src == ':') {
+                *dest++ = *src++;
+                *dest++ = ' ';
+            } else {
+                *dest++ = *src++;
+            }
+        } else {
+            *dest++ = *src++;
+        }
+    }
+    *dest = '\0'; /* 盖上字符串结束的盖子 */
+
+    /* 5. 释放原有的单行字符串，防止内存泄漏 */
+    cJSON_free(unformatted);
+    return formatted;
+}

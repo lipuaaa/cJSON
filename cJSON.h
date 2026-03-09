@@ -204,6 +204,12 @@ CJSON_PUBLIC(cJSON *) cJSON_ParseWithLengthOpts(const char *value, size_t buffer
 
 /* Render a cJSON entity to text for transfer/storage. */
 CJSON_PUBLIC(char *) cJSON_Print(const cJSON *item);/*格式化输出（带缩进）*/
+/* ------------------------------------------------------------- */
+/* 寒假作业：新增 cJSON 格式化输出美化功能 */
+/* 参数 item: 要打印的 JSON 节点 */
+/* 参数 spaces: 指定每层级缩进的空格数量 (如 2 或 4) */
+CJSON_PUBLIC(char *) cJSON_PrintPretty(const cJSON *item, int spaces);
+/* ------------------------------------------------------------- */
 /* Render a cJSON entity to text for transfer/storage without any formatting. */
 CJSON_PUBLIC(char *) cJSON_PrintUnformatted(const cJSON *item);/*无格式输出（紧凑）*/
 /* Render a cJSON entity to text using a buffered strategy. prebuffer is a guess at the final size. guessing well reduces reallocation. fmt=0 gives unformatted, =1 gives formatted */
